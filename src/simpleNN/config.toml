@@ -1,0 +1,17 @@
+[train_params]
+data_dir = "/data/solar_wind_pred_predsci/hdf"
+base_dir = "/data/solar_wind_pred_vignesh"
+batch_size = 32
+n_epochs = 200
+ngpu = 0
+lr = 8e-4
+
+[model_params]
+model_type = 'SimpleNN'
+scale_up = 1
+loss_fn = 'mse'
+pos_embedding = false
+
+[wandb_params]
+run_name = 'first_trail_run'
+group_name = 'SimpleNN'
