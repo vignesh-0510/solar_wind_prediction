@@ -7,8 +7,6 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 import seaborn as sns
 import sys
-import deepxde as dde
-from deepxde.backend import pytorch as bkd
 sys.path.append('/app')
 sys.path.append('..')
 import json
@@ -18,20 +16,20 @@ import wandb
 import argparse
 
 from utils.data_utils import read_hdf
-from dataloaders.simple_dataloader import SimpleDataset, get_cr_dirs
+from dataloaders.deeponet_dataloader import DeepONetDataset, get_cr_dirs
 from utils.gif_generator import create_gif_from_array 
-from utils.trainer import train, save_training_results_artifacts
-from model import SimpleNN
+from src.DeepONet.trainer import train, save_training_results_artifacts
+from model import make_deeponet
 
 def main():
 
     parser = argparse.ArgumentParser(description='Document helper.....')
-    parser.add_argument('--ngpu', type=int, default=1, help='set the gpu on which the model will run')
+    parser.add_argument('--ngpu', type=int, default=0, help='set the gpu on which the model will run')
     
     args = parser.parse_args()
     ngpu      = args.ngpu
     
-    with open('/app/src/simpleNN/config.toml', 'r') as f:
+    with open('/app/src/DeepONet/config.toml', 'r') as f:
         config = toml.load(f)
     
     DATA_DIR = config['train_params']['data_dir']
@@ -44,7 +42,13 @@ def main():
     scale_up = config['model_params']['scale_up']
     loss_fn_str = config['model_params']['loss_fn']
     pos_embedding = config['model_params']['pos_embedding']
+    trunk_sample_size = config['model_params']['trunk_sample_size']
+    branch_layers = config['model_params'].get('branch_layers', [128,128,128,128])
+    trunk_layers = config['model_params'].get('trunk_layers', [128,128,128,128])
 
+    wandb_run_name = config['wandb_params']['run_name']
+    wandb_group_name = config['wandb_params']['group_name'] 
+    enable_wandb_logging = config['wandb_params']['enable_wandb_logging']
     
     job_id = datetime.datetime.now().strftime("%Y_%m_%d__%H%M%S")
     if pos_embedding == False:
@@ -53,16 +57,18 @@ def main():
     cr_dirs = get_cr_dirs(DATA_DIR)
     split_ix = int(len(cr_dirs) * 0.8)
     cr_train, cr_val = cr_dirs[:split_ix], cr_dirs[split_ix:]
-    train_dataset = SimpleDataset(DATA_DIR, cr_train, scale_up=scale_up, pos_embedding=pos_embedding)   
-    val_dataset = SimpleDataset(
+    # cr_train, cr_val = cr_dirs[:32], cr_dirs[32:64]
+    train_dataset = DeepONetDataset(DATA_DIR, cr_train, scale_up=scale_up, pos_embedding=pos_embedding, trunk_sample_size=trunk_sample_size)   
+    val_dataset = DeepONetDataset(
         DATA_DIR,
         cr_val,
         scale_up=scale_up,
         v_min=train_dataset.v_min,
         v_max=train_dataset.v_max,
-        pos_embedding=pos_embedding
+        pos_embedding=pos_embedding,
+        trunk_sample_size=trunk_sample_size
     )
-    device = torch.device(f"cuda:{ngpu}" if torch.cuda.is_available() else "cpu")
+    device = torch.device(f"cuda:0" if torch.cuda.is_available() else "cpu")
     radii, thetas, phis = train_dataset.get_grid_points()
 
     if loss_fn_str == "l2":
@@ -81,9 +87,10 @@ def main():
         out_path,
         exist_ok=True,
     )
+
     run_params = {
-        "run_name": config['wandb_params']['run_name'] + '_' + job_id,
-        "group_name": config['wandb_params']['group_name'],
+        "run_name": wandb_run_name + '_' + job_id,
+        "group_name": wandb_group_name,
     }
     wandb_params = {
         "num_epochs": n_epochs,
@@ -96,7 +103,10 @@ def main():
         "loss_fn": loss_fn_str,
         "scale_up": scale_up,
         'weight_decay': 0.0,
-        'job_id': job_id
+        'job_id': job_id,
+        'trunk_sample_size': trunk_sample_size,
+        'branch_hidden_layers': branch_layers,
+        'trunk_hidden_layers': trunk_layers,
     }
     with open(os.path.join(out_path, "cfg.json"), "w", encoding="utf-8") as f:
         json.dump(wandb_params, f)
@@ -111,13 +121,15 @@ def main():
         raise ValueError('wrong pos embedding')
     
     wandb.login()
+    run = None
+    if enable_wandb_logging:
+        run = wandb.init(
+            name=run_params['run_name'],
+            group=run_params['group_name'],
+            config=wandb_params
+        )
 
-    run = wandb.init(
-        name=run_params['run_name'],
-        group=run_params['group_name'],
-        config=wandb_params
-    )
-    model = SimpleNN()
+    model = make_deeponet(train_dataset.get_branch_input_dims(), train_dataset.get_trunk_input_dims(), branch_hidden_layers=branch_layers, trunk_hidden_layers=trunk_layers, num_outputs=1)
 
     (
         training_results,
@@ -134,28 +146,28 @@ def main():
     )
 
     torch.save(best_state_dict, os.path.join(out_path, "best_model.pt"))
-    
-    artifact = wandb.Artifact(
-        name='best_model',
-        type='model',
-        description='best model after training'
-    )
-    artifact.add_file(os.path.join(out_path, f"best_model.pt"))
-    run.log_artifact(artifact)
+    if run is not None:
+        artifact = wandb.Artifact(
+            name='best_model',
+            type='model',
+            description='best model after training'
+        )
+        artifact.add_file(os.path.join(out_path, f"best_model.pt"))
+        run.log_artifact(artifact)
 
     filename = f"best_epoch-{best_epoch}.txt"
     with open(
         os.path.join(out_path, filename), "w", encoding="utf-8"
     ) as f:
         f.write(f"best_epoch: {best_epoch}")
-
-    artifact = wandb.Artifact(
-        name='best_epoch',
-        type='evaluation',
-        description='epoch with lowest validation loss'
-    )
-    artifact.add_file(os.path.join(out_path, filename))
-    run.log_artifact(artifact)
+    if run is not None:
+        artifact = wandb.Artifact(
+            name='best_epoch',
+            type='evaluation',
+            description='epoch with lowest validation loss'
+        )
+        artifact.add_file(os.path.join(out_path, filename))
+        run.log_artifact(artifact)
 
     save_training_results_artifacts(run, out_path, training_results)
 

@@ -1,0 +1,21 @@
+[train_params]
+data_dir = "/data/solar_wind_pred_predsci/hdf"
+base_dir = "/data/solar_wind_pred_vignesh"
+batch_size = 8
+n_epochs = 3200
+ngpu = 0
+lr = 1e-4
+
+[model_params]
+model_type = 'DeepONet'
+scale_up = 1
+loss_fn = 'mse'
+pos_embedding = false
+trunk_sample_size = 32768
+branch_layers = [6400,3200,1000,128]
+trunck_layers = [32,64,128,128]
+
+[wandb_params]
+enable_wandb_logging = true
+run_name = 'DON_loss_mse_batch_size_8'
+group_name = 'NativeDeepONet'

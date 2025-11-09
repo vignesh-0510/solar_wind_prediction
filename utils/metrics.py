@@ -304,6 +304,8 @@ def sobel_edge_map(batch_cube: torch.Tensor) -> torch.Tensor:
     Apply Sobel edge detection on each (H, W) frame in a tensor of shape (B, C, H, W).
     Returns a binary mask of shape (B, C, H, W) where edge pixels are 1.
     """
+    if batch_cube.ndim < 3:
+        return torch.ones_like(batch_cube)
     # Sobel kernels
     sobel_x = torch.tensor(
         [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],

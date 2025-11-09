@@ -118,7 +118,7 @@ def train(
             'train_loss': epoch_train_loss,
             'train_MSE': epoch_train_mse,
             'train_MSE_MASKED': epoch_train_mse_masked, 
-            'train_accuracy': epoch_train_acc,
+            'train_ACC': epoch_train_acc,
             'train_PSNR': epoch_train_psnr
         })
 
