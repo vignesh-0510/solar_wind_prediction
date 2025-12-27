@@ -104,38 +104,39 @@ def train(
         # -------------------- TRAIN --------------------
         model.train()
         running_metrics = {metric: 0.0 for metric in metrics_list}
+        train_dataset.reset_window_start()
+        for train_window in range(train_dataset.num_windows):
+            for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{n_epochs} [Train]", leave=False):
+                u = batch["branch"]                                   # (B, C*H*W)   or (B, D_branch)
+                coords = batch["trunk"]                               # (B, N, 3)    or sometimes (N, 3) broadcasted
+                y_true = batch["target"]                              # (B, N)
 
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{n_epochs} [Train]", leave=False):
-            u = batch["branch"]                                   # (B, C*H*W)   or (B, D_branch)
-            coords = batch["trunk"]                               # (B, N, 3)    or sometimes (N, 3) broadcasted
-            y_true = batch["target"]                              # (B, N)
+                optimizer.zero_grad(set_to_none=True)
+                B, N_points, _ = coords.shape
 
-            optimizer.zero_grad(set_to_none=True)
-            B, N_points, _ = coords.shape
+                # flatten for DeepXDE
+                coords_flat = coords.reshape(-1, coords.shape[-1])    # [B*N_points, 3]
+                u_repeat = u.repeat_interleave(N_points, dim=0)       # [B*N_points, D_branch]
+                y_flat = y_true.reshape(-1, 1)                        # [B*N_points, 1]
+                with accelerator.autocast():
+                    pred_flat = model((u_repeat, coords_flat))            # [B*N_points, 1]
+                    pred = pred_flat.view(B, N_points)       # (B, N)
+                    loss = loss_fn(pred, y_true)
+                # batch_climatology = climatology[batch["idx_r"].to(device), batch["idx_h"].to(device), batch["idx_w"].to(device)].view(B,-1).to(device)
+                accelerator.backward(loss)
+                optimizer.step()
 
-            # flatten for DeepXDE
-            coords_flat = coords.reshape(-1, coords.shape[-1])    # [B*N_points, 3]
-            u_repeat = u.repeat_interleave(N_points, dim=0)       # [B*N_points, D_branch]
-            y_flat = y_true.reshape(-1, 1)                        # [B*N_points, 1]
-            with accelerator.autocast():
-                pred_flat = model((u_repeat, coords_flat))            # [B*N_points, 1]
-                pred = pred_flat.view(B, N_points)       # (B, N)
-                loss = loss_fn(pred, y_true)
-            # batch_climatology = climatology[batch["idx_r"].to(device), batch["idx_h"].to(device), batch["idx_w"].to(device)].view(B,-1).to(device)
-            accelerator.backward(loss)
-            optimizer.step()
+                # bookkeeping
+                cur_loss = loss.detach() * y_true.size(0)
 
-            # bookkeeping
-            cur_loss = loss.detach() * y_true.size(0)
-
-            # ---- denormalize for metrics (matches your code path) ----
-            real_y   = y_true * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
-            real_pred= pred    * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
-            real_y   = real_y * 481.3711
-            real_pred= real_pred * 481.3711
-            running_metrics = update_running_metric(metrics_list, running_metrics, cur_loss, real_y, real_pred, y_true.size(0), accelerator)
-    
-        train_epoch_metrics = get_epoch_metric(metrics_list, running_metrics, len(train_loader.dataset), prefix='train')
+                # ---- denormalize for metrics (matches your code path) ----
+                real_y   = y_true * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
+                real_pred= pred    * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
+                real_y   = real_y * 481.3711
+                real_pred= real_pred * 481.3711
+                running_metrics = update_running_metric(metrics_list, running_metrics, cur_loss, real_y, real_pred, y_true.size(0), accelerator)
+            train_dataset.increment_window_start()
+        train_epoch_metrics = get_epoch_metric(metrics_list, running_metrics, len(train_loader.dataset)*train_dataset.num_windows, prefix='train')
         wandb_dict.update(train_epoch_metrics)
 
         update_metrics_list_dict(metrics_list, train_metrics_dict, train_epoch_metrics)
@@ -148,42 +149,44 @@ def train(
 
         running_metrics = {metric: 0.0 for metric in metrics_list}
         
+        test_dataset.reset_window_start()
         with torch.no_grad():
-            for batch in tqdm(test_loader, desc=f"Epoch {epoch+1}/{n_epochs} [Val]", leave=False):
-                u = batch["branch"]
-                coords = batch["trunk"]
-                y_true = batch["target"]
+            for test_window in range(test_dataset.num_windows):
+                for batch in tqdm(test_loader, desc=f"Epoch {epoch+1}/{n_epochs} [Val]", leave=False):
+                    u = batch["branch"]
+                    coords = batch["trunk"]
+                    y_true = batch["target"]
 
-                B, N_points, _ = coords.shape
+                    B, N_points, _ = coords.shape
 
-                # flatten for DeepXDE
-                coords_flat = coords.reshape(-1, coords.shape[-1])    # [B*N_points, 3]
-                u_repeat = u.repeat_interleave(N_points, dim=0)       # [B*N_points, D_branch]
-                y_flat = y_true.reshape(-1, 1)                        # [B*N_points, 1]
-                with accelerator.autocast():
-                    pred_flat = model((u_repeat, coords_flat))            # [B*N_points, 1]
-                    pred = pred_flat.view(B, N_points)       # (B, N)
-                    loss = loss_fn(pred, y_true)
+                    # flatten for DeepXDE
+                    coords_flat = coords.reshape(-1, coords.shape[-1])    # [B*N_points, 3]
+                    u_repeat = u.repeat_interleave(N_points, dim=0)       # [B*N_points, D_branch]
+                    y_flat = y_true.reshape(-1, 1)                        # [B*N_points, 1]
+                    with accelerator.autocast():
+                        pred_flat = model((u_repeat, coords_flat))            # [B*N_points, 1]
+                        pred = pred_flat.view(B, N_points)       # (B, N)
+                        loss = loss_fn(pred, y_true)
 
-                cur_loss= loss.detach() * y_true.size(0)
+                    cur_loss= loss.detach() * y_true.size(0)
 
-                # val_loss_sum += loss.item() * y_true.size(0)
-                # batch_climatology = climatology[batch["idx_r"].to(device), batch["idx_h"].to(device), batch["idx_w"].to(device)].view(1,B,-1).to(device)
-                real_y   = y_true * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
-                real_pred= pred    * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
-                real_y   = real_y * 481.3711
-                real_pred= real_pred * 481.3711
-                
-                running_metrics = update_running_metric(metrics_list, running_metrics, cur_loss, real_y, real_pred, y_true.size(0), accelerator)
-
-        test_epoch_metrics = get_epoch_metric(metrics_list, running_metrics, len(test_loader.dataset), prefix='test')
+                    # val_loss_sum += loss.item() * y_true.size(0)
+                    # batch_climatology = climatology[batch["idx_r"].to(device), batch["idx_h"].to(device), batch["idx_w"].to(device)].view(1,B,-1).to(device)
+                    real_y   = y_true * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
+                    real_pred= pred    * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
+                    real_y   = real_y * 481.3711
+                    real_pred= real_pred * 481.3711
+                    
+                    running_metrics = update_running_metric(metrics_list, running_metrics, cur_loss, real_y, real_pred, y_true.size(0), accelerator)
+            test_dataset.increment_window_start()
+        test_epoch_metrics = get_epoch_metric(metrics_list, running_metrics, len(test_loader.dataset)*test_dataset.num_windows, prefix='test')
         wandb_dict.update(test_epoch_metrics)
 
         update_metrics_list_dict(metrics_list, test_metrics_dict, test_epoch_metrics)
 
         if verbose and accelerator.is_main_process:
             print(
-                f"Epoch {epoch+1}: | learning Rate {scheduler.get_last_lr()[0]:.6f}",
+                f"Epoch {epoch+1}:",
                 f"Train Loss = {train_epoch_metrics['train_loss']:.6f} | Test Loss = {test_epoch_metrics['test_loss']:.6f}",
                 f"Train MSE = {train_epoch_metrics['train_MSE']:.6f} | Test MSE = {test_epoch_metrics['test_MSE']:.6f}",
                 f"Train MSE MASKED = {train_epoch_metrics['train_MSE_MASKED']:.6f} | Test MSE MASKED = {test_epoch_metrics['test_MSE_MASKED']:.6f}",

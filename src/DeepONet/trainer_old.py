@@ -134,12 +134,12 @@ def train(
             real_y   = real_y * 481.3711
             real_pred= real_pred * 481.3711
             running_metrics = update_running_metric(metrics_list, running_metrics, cur_loss, real_y, real_pred, y_true.size(0), accelerator)
-    
+
         train_epoch_metrics = get_epoch_metric(metrics_list, running_metrics, len(train_loader.dataset), prefix='train')
         wandb_dict.update(train_epoch_metrics)
 
         update_metrics_list_dict(metrics_list, train_metrics_dict, train_epoch_metrics)
-
+     
         # Step LR on validation loss later; here we could step on train loss, but val is better
         # scheduler.step(epoch_train_loss)
 
@@ -147,7 +147,7 @@ def train(
         model.eval()
 
         running_metrics = {metric: 0.0 for metric in metrics_list}
-        
+
         with torch.no_grad():
             for batch in tqdm(test_loader, desc=f"Epoch {epoch+1}/{n_epochs} [Val]", leave=False):
                 u = batch["branch"]
@@ -175,7 +175,6 @@ def train(
                 real_pred= real_pred * 481.3711
                 
                 running_metrics = update_running_metric(metrics_list, running_metrics, cur_loss, real_y, real_pred, y_true.size(0), accelerator)
-
         test_epoch_metrics = get_epoch_metric(metrics_list, running_metrics, len(test_loader.dataset), prefix='test')
         wandb_dict.update(test_epoch_metrics)
 
@@ -183,7 +182,7 @@ def train(
 
         if verbose and accelerator.is_main_process:
             print(
-                f"Epoch {epoch+1}: | learning Rate {scheduler.get_last_lr()[0]:.6f}",
+                f"Epoch {epoch+1}:",
                 f"Train Loss = {train_epoch_metrics['train_loss']:.6f} | Test Loss = {test_epoch_metrics['test_loss']:.6f}",
                 f"Train MSE = {train_epoch_metrics['train_MSE']:.6f} | Test MSE = {test_epoch_metrics['test_MSE']:.6f}",
                 f"Train MSE MASKED = {train_epoch_metrics['train_MSE_MASKED']:.6f} | Test MSE MASKED = {test_epoch_metrics['test_MSE_MASKED']:.6f}",

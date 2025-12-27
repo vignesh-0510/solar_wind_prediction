@@ -17,7 +17,7 @@ def create_gif_from_array(array, folder_path='./', file_name='image.gif', durati
 
     output_gif = os.path.join(folder_path, file_name)
     images = []
-    H, W, T = array.shape
+    T, H, W = array.shape
     # array = array.astype(np.uint8)  # Convert to uint8 for image representation
     for t in range(T):
         img = array[t]

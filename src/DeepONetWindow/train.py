@@ -30,7 +30,7 @@ def main():
     args = parser.parse_args()
     ngpu      = args.ngpu
     
-    with open('/app/src/DeepONet/config.toml', 'r') as f:
+    with open('/app/src/DeepONetWindow/config.toml', 'r') as f:
         config = toml.load(f)
     
     DATA_DIR = config['train_params']['data_dir']

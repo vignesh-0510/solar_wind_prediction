@@ -14,10 +14,14 @@ import toml
 import datetime
 import wandb
 import argparse
+from accelerate import Accelerator
 
 from utils.data_utils import read_hdf
-from dataloaders.deeponet_dataloader import DeepONetDataset, get_cr_dirs
+from src.DeepONet.deeponet_dataloader import DeepONetDataset, get_cr_dirs
 from utils.gif_generator import create_gif_from_array 
+from utils.save_summary import save_summary
+from utils.losses import L2OperatorLoss
+from neuralop import LpLoss
 from src.DeepONet.trainer import train, save_training_results_artifacts
 from model import make_deeponet
 
@@ -56,22 +60,25 @@ def main():
 
     cr_dirs = get_cr_dirs(DATA_DIR)
     split_ix = int(len(cr_dirs) * 0.8)
-    cr_train, cr_val = cr_dirs[:split_ix], cr_dirs[split_ix:]
-    # cr_train, cr_val = cr_dirs[:32], cr_dirs[32:64]
+    if enable_wandb_logging:
+        cr_train, cr_test = cr_dirs[:split_ix], cr_dirs[split_ix:]
+    else:
+        cr_train, cr_test = cr_dirs[:32], cr_dirs[32:64]
+
     train_dataset = DeepONetDataset(DATA_DIR, cr_train, scale_up=scale_up, pos_embedding=pos_embedding, trunk_sample_size=trunk_sample_size)   
-    val_dataset = DeepONetDataset(
+    test_dataset = DeepONetDataset(
         DATA_DIR,
-        cr_val,
+        cr_test,
         scale_up=scale_up,
         v_min=train_dataset.v_min,
         v_max=train_dataset.v_max,
         pos_embedding=pos_embedding,
         trunk_sample_size=trunk_sample_size
     )
-    device = torch.device(f"cuda:0" if torch.cuda.is_available() else "cpu")
+    accelerator = Accelerator()
     radii, thetas, phis = train_dataset.get_grid_points()
 
-    if loss_fn_str == "l2":
+    if loss_fn_str == "lp_loss":
         loss_fn = LpLoss(d=2, p=2)
     elif loss_fn_str == "h1":
         loss_fn = H1LossSpherical(r_grid=radii[1:], theta_grid=thetas, phi_grid=phis)
@@ -97,7 +104,7 @@ def main():
         "batch_size": batch_size,
         "learning_rate": lr,
         "train_files": cr_train,
-        "val_files": cr_val,
+        "test_files": cr_test,
         "v_min": float(train_dataset.v_min),
         "v_max": float(train_dataset.v_max),
         "loss_fn": loss_fn_str,
@@ -120,17 +127,25 @@ def main():
     else:
         raise ValueError('wrong pos embedding')
     
-    wandb.login()
+    if accelerator.is_main_process:
+        wandb.login()
+
+    model = make_deeponet(train_dataset.get_branch_input_dims(), train_dataset.get_trunk_input_dims(), branch_hidden_layers=branch_layers, trunk_hidden_layers=trunk_layers, num_outputs=1)
+
+    print('Branch input dims', train_dataset.get_branch_input_dims())
+    print('Trunk input dims', train_dataset.get_trunk_input_dims())
+    print('SIMS shape', train_dataset.sims[0].shape)
+
     run = None
-    if enable_wandb_logging:
+    if enable_wandb_logging and accelerator.is_main_process:
         run = wandb.init(
             name=run_params['run_name'],
             group=run_params['group_name'],
             config=wandb_params
         )
-
-    model = make_deeponet(train_dataset.get_branch_input_dims(), train_dataset.get_trunk_input_dims(), branch_hidden_layers=branch_layers, trunk_hidden_layers=trunk_layers, num_outputs=1)
-
+        save_summary(os.path.join(out_path, "branch_model_summary.txt"), model.branch, input_shape=(2, train_dataset.get_branch_input_dims()),)
+        save_summary(os.path.join(out_path, "trunk_model_summary.txt"), model.trunk, input_shape=(2, train_dataset.get_trunk_input_dims()),)
+    
     (
         training_results,
         best_epoch,
@@ -138,41 +153,41 @@ def main():
     ) = train(
         model,
         train_dataset,
-        val_dataset,
+        test_dataset,
         loss_fn,
-        device=device,
+        accelerator=accelerator,
         run=run,
         wandb_params=wandb_params,
     )
+    if accelerator.is_main_process:
+        torch.save(best_state_dict, os.path.join(out_path, "best_model.pt"))
+        if run is not None:
+            artifact = wandb.Artifact(
+                name='best_model',
+                type='model',
+                description='best model after training'
+            )
+            artifact.add_file(os.path.join(out_path, f"best_model.pt"))
+            run.log_artifact(artifact)
 
-    torch.save(best_state_dict, os.path.join(out_path, "best_model.pt"))
-    if run is not None:
-        artifact = wandb.Artifact(
-            name='best_model',
-            type='model',
-            description='best model after training'
-        )
-        artifact.add_file(os.path.join(out_path, f"best_model.pt"))
-        run.log_artifact(artifact)
+        filename = f"best_epoch-{best_epoch}.txt"
+        with open(
+            os.path.join(out_path, filename), "w", encoding="utf-8"
+        ) as f:
+            f.write(f"best_epoch: {best_epoch}")
+        if run is not None:
+            artifact = wandb.Artifact(
+                name='best_epoch',
+                type='evaluation',
+                description='epoch with lowest validation loss'
+            )
+            artifact.add_file(os.path.join(out_path, filename))
+            run.log_artifact(artifact)
 
-    filename = f"best_epoch-{best_epoch}.txt"
-    with open(
-        os.path.join(out_path, filename), "w", encoding="utf-8"
-    ) as f:
-        f.write(f"best_epoch: {best_epoch}")
-    if run is not None:
-        artifact = wandb.Artifact(
-            name='best_epoch',
-            type='evaluation',
-            description='epoch with lowest validation loss'
-        )
-        artifact.add_file(os.path.join(out_path, filename))
-        run.log_artifact(artifact)
+        save_training_results_artifacts(run, out_path, training_results)
 
-    save_training_results_artifacts(run, out_path, training_results)
-
-    print("Training completed.")
-    wandb.finish()
+        print("Training completed.")
+        wandb.finish()
 
 
 if __name__ == "__main__":

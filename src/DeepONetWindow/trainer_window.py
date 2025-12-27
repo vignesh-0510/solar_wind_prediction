@@ -1,5 +1,6 @@
 import itertools
 import numpy as np
+import math
 import os
 from torch.utils.data import DataLoader
 import torch
@@ -44,6 +45,22 @@ def get_training_results(train_metrics_dict, test_metrics_dict):
     training_results.update({k: np.array(v) for k, v in test_metrics_dict.items()})
     return training_results
 
+def fetch_grid(sims_shape, grid_shape, window_start, window_end):
+    maxR, maxH, maxW = sims_shape
+    nH, nW = grid_shape
+    r = np.arange(window_start, window_end, dtype=np.float32)/ (maxR)
+    h = np.arange(nH, dtype=np.float32) / (maxH)
+    w = np.arange(nW, dtype=np.float32) / (maxW)
+    # r = np.arange(window_start, window_end, dtype=np.float32)
+    # h = np.arange(nH, dtype=np.float32) 
+    # w = np.arange(nW, dtype=np.float32)
+
+    Rg, Hg, Wg = np.meshgrid(r, h, w, indexing="ij")
+    coords = np.stack([Rg, Hg, Wg], axis=-1).reshape(-1, 3)  
+
+    return coords 
+
+
 def train(
     model: nn.Module,
     train_dataset,
@@ -62,7 +79,7 @@ def train(
     assert len(set(metrics_list) - set(AVAILABLE_METRICS_DICT.keys())) == 0, f"metrics_list can only contain {list(AVAILABLE_METRICS_DICT.keys())}"
     batch_size, n_epochs = wandb_params["batch_size"], wandb_params["num_epochs"]
     lr, weight_decay = wandb_params["learning_rate"], wandb_params["weight_decay"]
-
+    
     # gen_cpu = torch.Generator(device="cuda")
     # gen_cpu.manual_seed(42)  # optional, for reproducibility    # Make DataLoaders use CPU RNG to avoid device mismatch
     
@@ -70,15 +87,11 @@ def train(
         train_dataset,
         batch_size=batch_size,
         shuffle=False,
-        # pin_memory=False,
-        # generator=gen_cpu,
     )
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        # pin_memory=False,
-        # generator=gen_cpu,
     )
 
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -97,45 +110,60 @@ def train(
     test_metrics_dict = {f'test_{metric}': [] for metric in metrics_list}
 
     # climatology = train_dataset.climatology.to(device)
+    H,W = train_dataset.sims.shape[3:]
+    T = train_dataset.sims.shape[2] // 2 + 1  # if you really want half
+    step = train_dataset.window_step
+    num_windows = math.ceil((T - 1) / step)
 
     for epoch in range(n_epochs):
         wandb_dict = {}
 
         # -------------------- TRAIN --------------------
+
         model.train()
         running_metrics = {metric: 0.0 for metric in metrics_list}
+        for window_start in range(1, T, step):
+            window_end = min(window_start + step, T)
+            coords_base = fetch_grid(
+                train_dataset.sims.shape[2:], (H, W),
+                window_start, window_end
+            )
+            coords_base = torch.from_numpy(coords_base).to(accelerator.device)  # (N,3)
 
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{n_epochs} [Train]", leave=False):
-            u = batch["branch"]                                   # (B, C*H*W)   or (B, D_branch)
-            coords = batch["trunk"]                               # (B, N, 3)    or sometimes (N, 3) broadcasted
-            y_true = batch["target"]                              # (B, N)
+            for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{n_epochs} [Train]", leave=False):
+                u = batch["branch"]                                   # (B, C*H*W)   or (B, D_branch)
+                idx = batch["index"]
+                optimizer.zero_grad(set_to_none=True)
+                y_true = torch.stack([
+                    torch.from_numpy(train_dataset.sims[i, 0, window_start:window_end]).float()
+                    for i in idx
+                ]).to(accelerator.device)                                          # (B,R,H,W)
+                B = y_true.shape[0]
+                # coords = coords_base.unsqueeze(0).expand(B, -1, -1)             # (B,N,3)
+                N_points = coords_base.shape[0]
 
-            optimizer.zero_grad(set_to_none=True)
-            B, N_points, _ = coords.shape
+                # flatten for DeepXDE
+                coords_flat = coords_base.repeat(B, 1)    # [B*N_points, 3]
+                u_repeat = u.repeat_interleave(N_points, dim=0)       # [B*N_points, D_branch]
+                with accelerator.autocast():
+                    pred_flat = model((u_repeat, coords_flat))            # [B*N_points, 1]
+                    pred = pred_flat.view(B, -1, H, W)       # (B, R',H ,W )
+                    loss = loss_fn(pred, y_true)
+                # batch_climatology = climatology[batch["idx_r"].to(device), batch["idx_h"].to(device), batch["idx_w"].to(device)].view(B,-1).to(device)
+                accelerator.backward(loss)
+                optimizer.step()
 
-            # flatten for DeepXDE
-            coords_flat = coords.reshape(-1, coords.shape[-1])    # [B*N_points, 3]
-            u_repeat = u.repeat_interleave(N_points, dim=0)       # [B*N_points, D_branch]
-            y_flat = y_true.reshape(-1, 1)                        # [B*N_points, 1]
-            with accelerator.autocast():
-                pred_flat = model((u_repeat, coords_flat))            # [B*N_points, 1]
-                pred = pred_flat.view(B, N_points)       # (B, N)
-                loss = loss_fn(pred, y_true)
-            # batch_climatology = climatology[batch["idx_r"].to(device), batch["idx_h"].to(device), batch["idx_w"].to(device)].view(B,-1).to(device)
-            accelerator.backward(loss)
-            optimizer.step()
+                # bookkeeping
+                cur_loss = loss.detach() * y_true.size(0)
 
-            # bookkeeping
-            cur_loss = loss.detach() * y_true.size(0)
+                # ---- denormalize for metrics (matches your code path) ----
+                real_y   = y_true * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
+                real_pred= pred    * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
+                real_y   = real_y * 481.3711
+                real_pred= real_pred * 481.3711
+                running_metrics = update_running_metric(metrics_list, running_metrics, cur_loss, real_y, real_pred, y_true.size(0), accelerator)
 
-            # ---- denormalize for metrics (matches your code path) ----
-            real_y   = y_true * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
-            real_pred= pred    * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
-            real_y   = real_y * 481.3711
-            real_pred= real_pred * 481.3711
-            running_metrics = update_running_metric(metrics_list, running_metrics, cur_loss, real_y, real_pred, y_true.size(0), accelerator)
-    
-        train_epoch_metrics = get_epoch_metric(metrics_list, running_metrics, len(train_loader.dataset), prefix='train')
+        train_epoch_metrics = get_epoch_metric(metrics_list, running_metrics, len(train_loader.dataset)*num_windows, prefix='train')
         wandb_dict.update(train_epoch_metrics)
 
         update_metrics_list_dict(metrics_list, train_metrics_dict, train_epoch_metrics)
@@ -148,42 +176,52 @@ def train(
 
         running_metrics = {metric: 0.0 for metric in metrics_list}
         
+        test_dataset.reset_window_start()
         with torch.no_grad():
-            for batch in tqdm(test_loader, desc=f"Epoch {epoch+1}/{n_epochs} [Val]", leave=False):
-                u = batch["branch"]
-                coords = batch["trunk"]
-                y_true = batch["target"]
+            for window_start in range(1, T, step):
+                window_end = min(window_start + step, T)
+                coords_base = fetch_grid(
+                    train_dataset.sims.shape[2:], (H, W),
+                    window_start, window_end
+                )
+                coords_base = torch.from_numpy(coords_base).to(accelerator.device)  # (N,3)
 
-                B, N_points, _ = coords.shape
+                for batch in tqdm(test_loader, desc=f"Epoch {epoch+1}/{n_epochs} [Val]", leave=False):
+                    u = batch["branch"]
+                    idx = batch["index"]
+                    y_true = torch.stack([
+                        torch.from_numpy(test_dataset.sims[i, 0, window_start:window_end]).float()
+                        for i in idx
+                    ]).to(accelerator.device)                                          # (B,R,H,W)
+                    B = y_true.shape[0]
+                    N_points = coords_base.shape[0]
 
-                # flatten for DeepXDE
-                coords_flat = coords.reshape(-1, coords.shape[-1])    # [B*N_points, 3]
-                u_repeat = u.repeat_interleave(N_points, dim=0)       # [B*N_points, D_branch]
-                y_flat = y_true.reshape(-1, 1)                        # [B*N_points, 1]
-                with accelerator.autocast():
-                    pred_flat = model((u_repeat, coords_flat))            # [B*N_points, 1]
-                    pred = pred_flat.view(B, N_points)       # (B, N)
-                    loss = loss_fn(pred, y_true)
+                    # flatten for DeepXDE
+                    coords_flat = coords_base.repeat(B, 1)    # [B*N_points, 3]
+                    u_repeat = u.repeat_interleave(N_points, dim=0)       # [B*N_points, D_branch]
+                    with accelerator.autocast():
+                        pred_flat = model((u_repeat, coords_flat))            # [B*N_points, 1]
+                        pred = pred_flat.view(B, -1, H, W)       # (B, N)
+                        loss = loss_fn(pred, y_true)
 
-                cur_loss= loss.detach() * y_true.size(0)
+                    cur_loss= loss.detach() * y_true.size(0)
 
-                # val_loss_sum += loss.item() * y_true.size(0)
-                # batch_climatology = climatology[batch["idx_r"].to(device), batch["idx_h"].to(device), batch["idx_w"].to(device)].view(1,B,-1).to(device)
-                real_y   = y_true * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
-                real_pred= pred    * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
-                real_y   = real_y * 481.3711
-                real_pred= real_pred * 481.3711
-                
-                running_metrics = update_running_metric(metrics_list, running_metrics, cur_loss, real_y, real_pred, y_true.size(0), accelerator)
-
-        test_epoch_metrics = get_epoch_metric(metrics_list, running_metrics, len(test_loader.dataset), prefix='test')
+                    # val_loss_sum += loss.item() * y_true.size(0)
+                    # batch_climatology = climatology[batch["idx_r"].to(device), batch["idx_h"].to(device), batch["idx_w"].to(device)].view(1,B,-1).to(device)
+                    real_y   = y_true * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
+                    real_pred= pred    * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
+                    real_y   = real_y * 481.3711
+                    real_pred= real_pred * 481.3711
+                    
+                    running_metrics = update_running_metric(metrics_list, running_metrics, cur_loss, real_y, real_pred, y_true.size(0), accelerator)
+        test_epoch_metrics = get_epoch_metric(metrics_list, running_metrics, len(test_loader.dataset)*num_windows, prefix='test')
         wandb_dict.update(test_epoch_metrics)
 
         update_metrics_list_dict(metrics_list, test_metrics_dict, test_epoch_metrics)
 
         if verbose and accelerator.is_main_process:
             print(
-                f"Epoch {epoch+1}: | learning Rate {scheduler.get_last_lr()[0]:.6f}",
+                f"Epoch {epoch+1}:",
                 f"Train Loss = {train_epoch_metrics['train_loss']:.6f} | Test Loss = {test_epoch_metrics['test_loss']:.6f}",
                 f"Train MSE = {train_epoch_metrics['train_MSE']:.6f} | Test MSE = {test_epoch_metrics['test_MSE']:.6f}",
                 f"Train MSE MASKED = {train_epoch_metrics['train_MSE_MASKED']:.6f} | Test MSE MASKED = {test_epoch_metrics['test_MSE_MASKED']:.6f}",

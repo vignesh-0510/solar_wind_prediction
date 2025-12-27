@@ -17,9 +17,9 @@ import argparse
 from torchinfo import summary
 
 from utils.data_utils import read_hdf
-from dataloaders.deeponet_dataloader import DeepONetDataset, get_cr_dirs
+from dataloaders.cnn_deeponet_dataloader import DeepONetDataset, get_cr_dirs
 from utils.gif_generator import create_gif_from_array 
-from src.DeepONet.trainer_0 import train, save_training_results_artifacts
+from src.DeepONetCNN.trainer_0 import train, save_training_results_artifacts
 from model import DeepONetCNN
 
 def main():
@@ -30,7 +30,7 @@ def main():
     args = parser.parse_args()
     ngpu      = args.ngpu
     
-    with open('/app/src/DeepONet/config.toml', 'r') as f:
+    with open('/app/src/DeepONetCNN/config.toml', 'r') as f:
         config = toml.load(f)
     
     DATA_DIR = config['train_params']['data_dir']
@@ -60,7 +60,8 @@ def main():
     split_ix = int(len(cr_dirs) * 0.8)
     cr_train, cr_val = cr_dirs[:split_ix], cr_dirs[split_ix:]
     # cr_train, cr_val = cr_dirs[:32], cr_dirs[32:64]
-    train_dataset = DeepONetDataset(DATA_DIR, cr_train, scale_up=scale_up, pos_embedding=pos_embedding, trunk_sample_size=trunk_sample_size)   
+    device = torch.device(f"cuda:{ngpu}" if torch.cuda.is_available() else "cpu")
+    train_dataset = DeepONetDataset(DATA_DIR, cr_train, scale_up=scale_up, pos_embedding=pos_embedding, device= device)   
     val_dataset = DeepONetDataset(
         DATA_DIR,
         cr_val,
@@ -68,9 +69,9 @@ def main():
         v_min=train_dataset.v_min,
         v_max=train_dataset.v_max,
         pos_embedding=pos_embedding,
-        trunk_sample_size=trunk_sample_size
+        device=device
     )
-    device = torch.device(f"cuda:0" if torch.cuda.is_available() else "cpu")
+    
     radii, thetas, phis = train_dataset.get_grid_points()
 
     if loss_fn_str == "l2":

@@ -1,0 +1,5 @@
+compute_environment: LOCAL_MACHINE
+distributed_type: MULTI_GPU
+mixed_precision: fp16
+num_processes: 2
+gpu_ids: 0,1

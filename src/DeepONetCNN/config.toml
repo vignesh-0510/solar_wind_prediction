@@ -1,0 +1,22 @@
+[train_params]
+data_dir = "/data/solar_wind_pred_predsci/hdf"
+base_dir = "/data/solar_wind_pred_vignesh"
+batch_size =6
+n_epochs = 200
+ngpu = 0
+lr = 1e-4
+
+[model_params]
+model_type = 'CNN_DeepONet_v1'
+scale_up = 1
+loss_fn = 'mse'
+pos_embedding = false
+trunk_sample_size = 32768
+branch_layers = [2500,1000,512,128]
+trunk_layers = [32,64,128,128]
+
+[wandb_params]
+enable_wandb_logging = true
+run_name = 'CDON_loss_mse_batch_size_8'
+group_name = 'CNNDeepONet_FullGrid'
+description = 'CNN architecture(4 layers) + Channel Mixing + WeightedAvgPooling + full grid points'

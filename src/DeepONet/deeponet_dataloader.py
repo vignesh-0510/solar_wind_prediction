@@ -65,20 +65,13 @@ class DeepONetDataset(SimpleDataset):
             pos_embedding=pos_embedding,
         )
         self.trunk_sample_size = trunk_sample_size
-        
-        self.window_start = 1
-        self.window_step = 5
-        # self.num_windows = math.ceil((self.sims.shape[2] - 2) / self.window_step)
-        self.num_windows = math.ceil(70 / self.window_step)
 
     def __getitem__(self, index):
         cube = self.sims[index]
-        self.window_end = min(self.window_start + self.window_step, cube.shape[1]//2)
         u_surface = cube[:, 0, :, :]   # (C, H, W)
-        y_target = cube[0, self.window_start:self.window_end, :, :] 
+        y_target = cube[0, -1, :, :] 
 
         # Flatten surface for branch input
-        # u_surface = resize_3d(u_surface, u_surface.shape[1]//2, u_surface.shape[2]//2)
         branch_input = torch.tensor(u_surface, dtype=torch.float32).reshape(-1)
         
         # Fast random sampling of trunk points
@@ -93,18 +86,15 @@ class DeepONetDataset(SimpleDataset):
         # target = torch.from_numpy(target)
 
         # Full Grid for trunk input
-        nR, nH, nW = y_target.shape
+        nH, nW = y_target.shape
         maxR, maxH, maxW = cube.shape[1:]
-        r = np.arange(self.window_start, self.window_end, dtype=np.float32)/ (maxR)
         h = np.arange(nH, dtype=np.float32) / (maxH)
         w = np.arange(nW, dtype=np.float32) / (maxW)
-        # r = np.arange(self.window_start, window_end, dtype=np.float32)
-        # h = np.arange(nH, dtype=np.float32)
-        # w = np.arange(nW, dtype=np.float32)
 
-        Rg, Hg, Wg = np.meshgrid(r, h, w, indexing="ij")
 
-        coords = np.stack([Rg, Hg, Wg], axis=-1).reshape(-1, 3)      # (N,3)
+        Hg, Wg = np.meshgrid(h, w, indexing="ij")
+
+        coords = np.stack([Hg, Wg], axis=-1).reshape(-1, 2)      # (N,2)
         target = y_target.reshape(-1).astype(np.float32)            # (N,)
 
         trunk_input = torch.from_numpy(coords)    # (1, N, 3)
@@ -118,10 +108,7 @@ class DeepONetDataset(SimpleDataset):
             # "idx_h": idx_h,
             # "idx_w": idx_w,
         }
-    def increment_window_start(self):
-        self.window_start += self.window_step
-    def reset_window_start(self):
-        self.window_start = 2
+
     def __len__(self):
         return len(self.sims)
 
@@ -136,83 +123,4 @@ class DeepONetDataset(SimpleDataset):
         return (C * H * W)
         
     def get_trunk_input_dims(self):
-        return 3  # r, theta, phi
-
-class WindowDeepONetDataset(SimpleDataset):
-    def __init__(
-        self,
-        data_path,
-        cr_list,
-        v_min=None,
-        v_max=None,
-        instruments=None,
-        scale_up=1,
-        pos_embedding = None,
-        trunk_sample_size=32768,
-    ):
-        super().__init__(
-            data_path=data_path,
-            cr_list=cr_list,
-            v_min=v_min,
-            v_max=v_max,
-            instruments=instruments,
-            scale_up=scale_up,
-            pos_embedding=pos_embedding,
-        )
-        self.trunk_sample_size = trunk_sample_size
-        
-        self.window_start = 1
-        self.window_step = 5
-        self.num_windows = math.ceil(70 / self.window_step)
-
-    def __getitem__(self, index):
-        cube = self.sims[index]
-        self.window_end = min(self.window_start + self.window_step, cube.shape[1]//2)
-        u_surface = cube[:, 0, :, :]   # (C, H, W)
-        y_target = cube[0, self.window_start:self.window_end, :, :] 
-
-        # Flatten surface for branch input
-        branch_input = torch.tensor(u_surface, dtype=torch.float32).reshape(-1)
-        
-        # Full Grid for trunk input
-        nR, nH, nW = y_target.shape
-        maxR, maxH, maxW = cube.shape[1:]
-        r = np.arange(self.window_start, self.window_end, dtype=np.float32)/ (maxR)
-        h = np.arange(nH, dtype=np.float32) / (maxH)
-        w = np.arange(nW, dtype=np.float32) / (maxW)
-
-        Rg, Hg, Wg = np.meshgrid(r, h, w, indexing="ij")
-
-        coords = np.stack([Rg, Hg, Wg], axis=-1).reshape(-1, 3)      # (N,3)
-        target = y_target.reshape(-1).astype(np.float32)            # (N,)
-
-        trunk_input = torch.from_numpy(coords)    # (1, N, 3)
-        target = torch.from_numpy(target)         # (1, N)
-
-        return {
-            "branch": branch_input,   # (H * W * C,)
-            "trunk": trunk_input,     # (N, 3)
-            "index": index,          # (N,)
-            # "idx_r": idx_r,
-            # "idx_h": idx_h,
-            # "idx_w": idx_w,
-        }
-    def increment_window_start(self):
-        self.window_start += self.window_step
-    def reset_window_start(self):
-        self.window_start = 2
-    def __len__(self):
-        return len(self.sims)
-
-    def get_min_max(self):
-        return {"v_min": float(self.v_min), "v_max": float(self.v_max)}
-
-    def get_grid_points(self):
-        return get_coords(self.sim_paths[0])
-
-    def get_branch_input_dims(self):
-        C, H, W = self.sims.shape[1], self.sims.shape[3], self.sims.shape[4]
-        return (C * H * W)
-        
-    def get_trunk_input_dims(self):
-        return 3  # r, theta, phi
+        return 2  # r, theta, phi

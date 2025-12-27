@@ -23,9 +23,14 @@ def update_running_metric(metrics_list, running_dict, loss, real_y, real_pred, b
         else:
             metric_val = AVAILABLE_METRICS_DICT[k](real_y, real_pred)
             metric_val = metric_val * batch_size_local
+        
         metric_tensor = torch.tensor(metric_val, device=real_y.device)
+        # gather across all ranks
         gathered = accelerator.gather_for_metrics(metric_tensor)
+
+        # sum across all GPUs
         running_dict[k] += gathered.sum().item()
+
     return running_dict
 
 def get_epoch_metric(metrics_list, running_dict, dataset_size, prefix='train'):
@@ -59,9 +64,12 @@ def train(
     Train DeepONet with (branch, trunk, target) batches.
     """
 
-    assert len(set(metrics_list) - set(AVAILABLE_METRICS_DICT.keys())) == 0, f"metrics_list can only contain {list(AVAILABLE_METRICS_DICT.keys())}"
+    assert len(set(metrics_list) - set(AVAILABLE_METRICS_DICT.keys())) == 0, \
+    f"metrics_list can only contain {list(AVAILABLE_METRICS_DICT.keys())}"
+
     batch_size, n_epochs = wandb_params["batch_size"], wandb_params["num_epochs"]
     lr, weight_decay = wandb_params["learning_rate"], wandb_params["weight_decay"]
+    device = accelerator.device
 
     # gen_cpu = torch.Generator(device="cuda")
     # gen_cpu.manual_seed(42)  # optional, for reproducibility    # Make DataLoaders use CPU RNG to avoid device mismatch
@@ -82,8 +90,12 @@ def train(
     )
 
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    model, optimizer, train_loader, test_loader = accelerator.prepare(model, optimizer, train_loader, test_loader)
+
+    model, optimizer, train_loader, test_loader = accelerator.prepare(
+    model, optimizer, train_loader, test_loader)
+
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=5)
+
     # autocast_device_type = "cuda" if "cuda" in device.type else "cpu"
     # scaler = torch.amp.GradScaler(device=autocast_device_type)
 
@@ -106,22 +118,15 @@ def train(
         running_metrics = {metric: 0.0 for metric in metrics_list}
 
         for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{n_epochs} [Train]", leave=False):
-            u = batch["branch"]                                   # (B, C*H*W)   or (B, D_branch)
-            coords = batch["trunk"]                               # (B, N, 3)    or sometimes (N, 3) broadcasted
-            y_true = batch["target"]                              # (B, N)
+            u = batch["branch"]  # (B, C*H*W)   or (B, D_branch)
+            coords = batch["trunk"] # (B, N, 3)    or sometimes (N, 3) broadcasted
+            y_true = batch["target"] # (B, N)
 
-            optimizer.zero_grad(set_to_none=True)
-            B, N_points, _ = coords.shape
-
-            # flatten for DeepXDE
-            coords_flat = coords.reshape(-1, coords.shape[-1])    # [B*N_points, 3]
-            u_repeat = u.repeat_interleave(N_points, dim=0)       # [B*N_points, D_branch]
-            y_flat = y_true.reshape(-1, 1)                        # [B*N_points, 1]
             with accelerator.autocast():
-                pred_flat = model((u_repeat, coords_flat))            # [B*N_points, 1]
-                pred = pred_flat.view(B, N_points)       # (B, N)
+                pred = model(u, coords)
                 loss = loss_fn(pred, y_true)
             # batch_climatology = climatology[batch["idx_r"].to(device), batch["idx_h"].to(device), batch["idx_w"].to(device)].view(B,-1).to(device)
+            optimizer.zero_grad(set_to_none=True)
             accelerator.backward(loss)
             optimizer.step()
 
@@ -134,7 +139,7 @@ def train(
             real_y   = real_y * 481.3711
             real_pred= real_pred * 481.3711
             running_metrics = update_running_metric(metrics_list, running_metrics, cur_loss, real_y, real_pred, y_true.size(0), accelerator)
-    
+
         train_epoch_metrics = get_epoch_metric(metrics_list, running_metrics, len(train_loader.dataset), prefix='train')
         wandb_dict.update(train_epoch_metrics)
 
@@ -147,22 +152,15 @@ def train(
         model.eval()
 
         running_metrics = {metric: 0.0 for metric in metrics_list}
-        
+
         with torch.no_grad():
-            for batch in tqdm(test_loader, desc=f"Epoch {epoch+1}/{n_epochs} [Val]", leave=False):
+            for batch in tqdm(test_loader, desc=f"Epoch {epoch+1}/{n_epochs} [Test]", leave=False):
                 u = batch["branch"]
                 coords = batch["trunk"]
                 y_true = batch["target"]
 
-                B, N_points, _ = coords.shape
-
-                # flatten for DeepXDE
-                coords_flat = coords.reshape(-1, coords.shape[-1])    # [B*N_points, 3]
-                u_repeat = u.repeat_interleave(N_points, dim=0)       # [B*N_points, D_branch]
-                y_flat = y_true.reshape(-1, 1)                        # [B*N_points, 1]
                 with accelerator.autocast():
-                    pred_flat = model((u_repeat, coords_flat))            # [B*N_points, 1]
-                    pred = pred_flat.view(B, N_points)       # (B, N)
+                    pred = model(u, coords)
                     loss = loss_fn(pred, y_true)
 
                 cur_loss= loss.detach() * y_true.size(0)
@@ -175,7 +173,6 @@ def train(
                 real_pred= real_pred * 481.3711
                 
                 running_metrics = update_running_metric(metrics_list, running_metrics, cur_loss, real_y, real_pred, y_true.size(0), accelerator)
-
         test_epoch_metrics = get_epoch_metric(metrics_list, running_metrics, len(test_loader.dataset), prefix='test')
         wandb_dict.update(test_epoch_metrics)
 
@@ -183,12 +180,12 @@ def train(
 
         if verbose and accelerator.is_main_process:
             print(
-                f"Epoch {epoch+1}: | learning Rate {scheduler.get_last_lr()[0]:.6f}",
+                f"Epoch {epoch+1}:",
                 f"Train Loss = {train_epoch_metrics['train_loss']:.6f} | Test Loss = {test_epoch_metrics['test_loss']:.6f}",
                 f"Train MSE = {train_epoch_metrics['train_MSE']:.6f} | Test MSE = {test_epoch_metrics['test_MSE']:.6f}",
                 f"Train MSE MASKED = {train_epoch_metrics['train_MSE_MASKED']:.6f} | Test MSE MASKED = {test_epoch_metrics['test_MSE_MASKED']:.6f}",
                 f"Train PSNR = {train_epoch_metrics['train_PSNR']:.6f} | Test PSNR = {test_epoch_metrics['test_PSNR']:.6f}",
-                "="*30,
+                "================================================================================================",
                 sep = '\n'
             )
         if run is not None and accelerator.is_main_process:
@@ -202,9 +199,11 @@ def train(
             best_epoch = epoch
 
         # Step LR on validation loss
+        # if accelerator.is_main_process:
+        #     scheduler.step(test_epoch_metrics['test_loss'])
         scheduler.step(test_epoch_metrics['test_loss'])
 
-    if verbose and accelerator.is_main_process:
+    if verbose:
         print(f"\nTraining complete. Best testing loss: {best_test_loss:.6f}")
 
     training_results = get_training_results(train_metrics_dict, test_metrics_dict)
