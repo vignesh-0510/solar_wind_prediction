@@ -1,0 +1,23 @@
+[train_params]
+data_dir = "/data/solar_wind_pred_predsci/hdf"
+base_dir = "/data/solar_wind_pred_vignesh"
+batch_size = 16
+n_epochs = 50
+ngpu = 0
+lr = 1e-4
+
+[model_params]
+model_type = 'DeepONet_SFNO'
+scale_up = 1 
+loss_fn = 'mse'
+pos_embedding = false
+trunk_sample_size = 32768
+branch_layers = [2000,512,100]
+trunk_layers = [4,8,16,24,32]
+job_id = "2026_01_05__065100"
+
+[wandb_params]
+enable_wandb_logging = true
+run_name = 'DON_SFNO_mse_loss'
+group_name = 'DeepONet_SFNO'
+description = 'SFNO architecture(4 layers)' 

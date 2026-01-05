@@ -1,0 +1,22 @@
+[train_params]
+data_dir = "/data/solar_wind_pred_predsci/hdf"
+base_dir = "/data/solar_wind_pred_vignesh"
+batch_size = 4
+n_epochs = 50
+ngpu = 0
+lr = 1e-4
+
+[model_params]
+model_type = 'DeepONet_Window'
+scale_up = 0.5
+loss_fn = 'mse'
+pos_embedding = false
+trunk_sample_size = 32768
+branch_layers = [2048,1024,512]
+trunk_layers = [32,64,128,512]
+
+[wandb_params]
+enable_wandb_logging = false
+run_name = 'DON_Window_loss_mse_loss'
+group_name = 'DeepONet_Sliding_Window_Size_1'
+description = 'MLP architecture(4 layers) + last 3 grid points'

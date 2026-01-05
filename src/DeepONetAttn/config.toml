@@ -1,0 +1,23 @@
+[train_params]
+data_dir = "/data/solar_wind_pred_predsci/hdf"
+base_dir = "/data/solar_wind_pred_vignesh"
+batch_size = 2
+n_epochs = 100
+
+ngpu = 0
+lr = 1e-3
+
+[model_params]
+model_type = 'DeepONetAttn'
+scale_up = 0.75
+loss_fn = 'mse'
+pos_embedding = false
+trunk_sample_size = 32768
+branch_layers = [5000, 1024,512]
+trunk_layers = [8, 32, 64,128,512]
+
+[wandb_params]
+enable_wandb_logging = true
+run_name = 'DON_Attn_mse_loss'
+group_name = 'DeepONet_Attn'
+description = 'MLP architecture(4 layers) + last  grid point' 

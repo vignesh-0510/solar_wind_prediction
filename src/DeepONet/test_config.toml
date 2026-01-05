@@ -1,0 +1,23 @@
+[train_params]
+data_dir = "/data/solar_wind_pred_predsci/hdf"
+base_dir = "/data/solar_wind_pred_vignesh"
+batch_size = 4
+n_epochs = 50
+ngpu = 0
+lr = 1e-4
+
+[model_params]
+model_type = 'DeepONet_v1'
+scale_up = 1 
+loss_fn = 'mse'
+pos_embedding = false
+trunk_sample_size = 32768
+branch_layers = [2000,512,128]
+trunk_layers = [8,16, 32,64,128]
+job_id = "2025_12_22__171510"
+
+[wandb_params]
+enable_wandb_logging = true
+run_name = 'DON_loss_LP_mse_loss'
+group_name = 'DeepONet_Last_radii'
+description = 'MLP architecture(4 layers) + last 3 grid points'
