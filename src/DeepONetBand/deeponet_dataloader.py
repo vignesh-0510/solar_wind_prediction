@@ -54,7 +54,7 @@ class DeepONetDataset(SimpleDataset):
         scale_up=1,
         pos_embedding = None,
         trunk_sample_size=32768,
-        transform='sqrt'
+        transform = None
     ):
         super().__init__(
             data_path=data_path,
@@ -64,27 +64,27 @@ class DeepONetDataset(SimpleDataset):
             instruments=instruments,
             scale_up=scale_up,
             pos_embedding=pos_embedding,
-            transform=transform
+            transform=transform,
         )
         self.trunk_sample_size = trunk_sample_size
-        
-
+        self.band_start = 28
+        self.band_end = 84
     def __getitem__(self, index):
         cube = self.sims[index]
-        # cube = np.clip(cube, 0.0, 1.0)
-        # u_surface = np.sqrt(cube[:, 0, :, :])  # (C, H, W)
-        # y_target = np.sqrt(cube[0, -1, :, :]) 
-        u_surface = cube[:, 0, :, :]  # (C, H, W)
-        y_target = cube[0, -1, :, :] 
-        
+
+        u_surface = cube[:, 0, :, :]   # (C, H, W)
+        y_target = cube[0, -1, self.band_start:self.band_end, :] 
+
         # Flatten surface for branch input
-        branch_input = torch.tensor(u_surface, dtype=torch.float32)
+        # branch_input = torch.as_tensor(u_surface, dtype=torch.float32).reshape(-1)
+        branch_input = torch.as_tensor(u_surface, dtype=torch.float32)
 
         # Full Grid for trunk input
         nH, nW = y_target.shape
         maxR, maxH, maxW = cube.shape[1:]
-        h = np.arange(nH, dtype=np.float32) / (maxH)
-        w = np.arange(nW, dtype=np.float32) / (maxW)
+        h = np.arange(nH, dtype=np.float32)/(nH-1)
+        w = np.arange(nW, dtype=np.float32)/(nW-1)
+
 
         Hg, Wg = np.meshgrid(h, w, indexing="ij")
 
@@ -95,9 +95,12 @@ class DeepONetDataset(SimpleDataset):
         target = torch.from_numpy(target)         # (1, N)
 
         return {
-            "branch": branch_input,   # (H , W, C)
+            "branch": 1-branch_input,   # (H * W * C,)
             "trunk": trunk_input,     # (N, 3)
-            "target": target,          # (N,)
+            "target": 1-target,          # (N,)
+            # "idx_r": idx_r,
+            # "idx_h": idx_h,
+            # "idx_w": idx_w,
         }
 
     def __len__(self):
@@ -111,7 +114,8 @@ class DeepONetDataset(SimpleDataset):
 
     def get_branch_input_dims(self):
         C, H, W = self.sims.shape[1], self.sims.shape[3], self.sims.shape[4]
-        return (C , H, W)
+        # return (C * (self.band_end - self.band_start) * W)
+        return (C * H * W)
         
     def get_trunk_input_dims(self):
         return 2  # r, theta, phi

@@ -96,13 +96,32 @@ def enlarge_cube(cube, scale):
     return zoom(cube, (1, scale, scale), order=1)
 
 
-def min_max_normalize(array, min_=None, max_=None):
-    if min_ is None or max_ is None:
+# def min_max_normalize(array, min_=None, max_=None):
+#     if min_ is None or max_ is None:
+#         min_ = np.min(array[:, 0, :, :, :])
+#         max_ = np.max(array[:, 0, :, :, :])
+#     array[:, 0, :, :, :] = (array[:, 0, :, :, :] - min_) / (max_ - min_ + 1e-9)
+#     return array, min_, max_
+
+def min_max_normalize(array, min_=None, max_=None, transform='log'):
+    if transform == 'log':
+        array[:, 0, :, :, :] = np.log(array[:, 0, :, :, :])
         min_ = np.min(array[:, 0, :, :, :])
         max_ = np.max(array[:, 0, :, :, :])
-    array[:, 0, :, :, :] = (array[:, 0, :, :, :] - min_) / (max_ - min_ + 1e-9)
+        array[:, 0, :, :, :] = (array[:, 0, :, :, :] - min_) / (max_ - min_ + 1e-9)
+    
+    elif transform == 'sqrt':
+        array[:, 0, :, :, :] = np.sqrt(array[:, 0, :, :, :])
+        min_ = np.min(array[:, 0, :, :, :])
+        max_ = np.max(array[:, 0, :, :, :])
+        array[:, 0, :, :, :] = (array[:, 0, :, :, :] - min_) / (max_ - min_ + 1e-9)
+    
+    else:
+        min_ = np.min(array[:, 0, :, :, :])
+        max_ = np.max(array[:, 0, :, :, :])
+        array[:, 0, :, :, :] = (array[:, 0, :, :, :] - min_) / (max_ - min_ + 1e-9)
+    
     return array, min_, max_
-
 
 def compute_climatology(data: np.ndarray, scale_up) -> np.ndarray:
     """
@@ -160,12 +179,13 @@ class SimpleDataset(Dataset):
         v_max=None,
         instruments=None,
         scale_up=1,
-        pos_embedding = None
+        pos_embedding = None,
+        transform='log'
     ):
         super().__init__()
         self.sim_paths = collect_sim_paths(data_path, cr_list, instruments)
         sims, _ = get_sims(self.sim_paths, scale_up, pos_embedding)
-        sims, self.v_min, self.v_max = min_max_normalize(sims, v_min, v_max)
+        sims, self.v_min, self.v_max = min_max_normalize(sims, v_min, v_max, transform=transform)
         self.sims = sims
         # self.climatology = compute_climatology(sims[:, 0, 1:, :, :], scale_up)
 

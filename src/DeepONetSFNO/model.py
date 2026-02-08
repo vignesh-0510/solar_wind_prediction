@@ -29,7 +29,7 @@ class SFNOBranch(nn.Module):
             in_channels=1,
             out_channels=out_channels,
             hidden_channels=hidden_channels,
-            n_layers=4,
+            n_layers=6,
             factorization="dense",
             projection_channel_ratio=2,
             positional_embedding=None
@@ -69,7 +69,8 @@ class TrunkNet(nn.Module):
         self.net = nn.Sequential(*layers)
 
     def forward(self, x):
-        return self.net(x)  # (B, N, K)
+        t = self.net(x)
+        return F.normalize(t, dim=-1)
 
 class SFNODeepONet(nn.Module):
     def __init__(self, trunk_input_dim, trunk_hidden_layers, K=100):

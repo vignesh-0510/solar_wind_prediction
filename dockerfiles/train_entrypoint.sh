@@ -3,7 +3,7 @@ set -euo pipefail      # stop on error, undefined vars are errors
 IFS=$'\n\t'
 
 
-TRAIN_FILE_PATH="${TRAIN_FILE_PATH:-DeepONetSFNO}"
+TRAIN_FILE_PATH="${TRAIN_FILE_PATH:-DeepONetBand}"
 readonly TRAIN_FILE_PATH
 
 # Path to accelerate config file
