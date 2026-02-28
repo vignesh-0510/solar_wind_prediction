@@ -11,10 +11,10 @@ scale_up = 1
 loss_fn = 'mse'
 pos_embedding = false
 branch_layers = [2000,512,100]
-trunk_layers = [4,8,16,24,32]
+trunk_layers = [4,8,16,24,,64,100]
 
 [wandb_params]
 enable_wandb_logging = true
 run_name = 'DON_SFNO_mse_loss'
 group_name = 'DeepONet_SFNO'
-description = 'SFNO architecture(4 layers)' 
+description = 'SFNO architecture(4 layers) SQRT Transform' 

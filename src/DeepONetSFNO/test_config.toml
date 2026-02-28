@@ -13,8 +13,8 @@ loss_fn = 'mse'
 pos_embedding = false
 trunk_sample_size = 32768
 branch_layers = [2000,512,100]
-trunk_layers = [4,8,16,24,32]
-job_id = "2026_01_05__065100"
+trunk_layers = [4,8,16,24,,64,100]
+job_id = "2026_01_19__075017"
 
 [wandb_params]
 enable_wandb_logging = true

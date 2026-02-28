@@ -1,0 +1,24 @@
+[train_params]
+data_dir = "/data/solar_wind_pred_predsci/hdf"
+base_dir = "/data/solar_wind_pred_vignesh"
+batch_size = 4
+n_epochs = 50
+ngpu = 0
+lr = 1e-3
+data_transform = false
+
+[model_params]
+model_type = 'DeepONet_Band'
+scale_up = 1
+loss_fn = 'mse'
+pos_embedding = false
+trunk_sample_size = 32768
+branch_layers = [7168,4000,1000,256]
+trunk_layers = [32, 128,128,256]
+
+
+[wandb_params]
+enable_wandb_logging = true
+run_name = 'DON_band_inverse'
+group_name = 'DeepONet_Band_Window'
+description = 'MLP architecture(4 layers) + Band + SQRT transform' 

@@ -1,0 +1,19 @@
+[train_params]
+data_dir = "/data/solar_wind_pred_vignesh/hdf/medium"
+base_dir = "/data/solar_wind_pred_vignesh"
+batch_size = 4
+n_epochs = 100
+lr = 1e-3
+data_transform = 'sqrt'
+
+[model_params]
+model_type = 'ParamNetwork'
+scale_up = 1
+loss_fn = 'mse'
+pos_embedding = false
+
+[wandb_params]
+enable_wandb_logging = true
+run_name = 'V3_SQRT_transform'
+group_name = 'ParamNetwork'
+description = 'REZA inspired SFNO Architecture with custom signed log transformeration' 

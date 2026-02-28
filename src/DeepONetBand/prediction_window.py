@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 from accelerate import Accelerator
 import sys
 sys.path.append('/app')
-from dataloaders.simple_dataloader import SimpleDataset, collect_sim_paths, get_sims, min_max_normalize, compute_climatology, get_coords, get_cr_dirs
+from deeponet_window_dataloader import *
 from model import make_deeponet
 from utils.gif_generator import create_gif_from_array, create_input_output_gif
 import torch.nn as nn
@@ -18,80 +18,84 @@ add_safe_globals([torch.nn.functional.gelu, SphericalConv])
 
 from model import make_deeponet
 
-class DeepONetDataset(SimpleDataset):
-    def __init__(
-        self,
-        data_path,
-        cr_list,
-        v_min=None,
-        v_max=None,
-        instruments=None,
-        scale_up=1,
-        pos_embedding = None,
-        trunk_sample_size=32768,
-    ):
-        super().__init__(
-            data_path=data_path,
-            cr_list=cr_list,
-            v_min=v_min,
-            v_max=v_max,
-            instruments=instruments,
-            scale_up=scale_up,
-            pos_embedding=pos_embedding,
-            transform='sqrt'
-        )
-        self.trunk_sample_size = trunk_sample_size
-        self.band_start = 28
-        self.band_end = 84
+# class DeepONetDataset(SimpleDataset):
+#     def __init__(
+#         self,
+#         data_path,
+#         cr_list,
+#         v_min=None,
+#         v_max=None,
+#         instruments=None,
+#         scale_up=1,
+#         pos_embedding = None,
+#         trunk_sample_size=32768,
+#     ):
+#         super().__init__(
+#             data_path=data_path,
+#             cr_list=cr_list,
+#             v_min=v_min,
+#             v_max=v_max,
+#             instruments=instruments,
+#             scale_up=scale_up,
+#             pos_embedding=pos_embedding,
+#             transform=None
+#         )
+#         self.trunk_sample_size = trunk_sample_size
+#         self.band_start = 28
+#         self.band_end = 84
+#         self.window_start = 139
+#         self.window_step = 1
+#         # self.num_windows = math.ceil(139 / self.window_step)
 
-    def __getitem__(self, index):
-        cube = self.sims[index]
+#     def __getitem__(self, index):
+#         cube = self.sims[index]
 
-        u_surface = cube[:, 0, :, :]   # (C, H, W)
-        y_target = cube[0, -1, self.band_start:self.band_end, :] 
+#         u_surface = cube[:, 0, :, :]   # (C, H, W)
+#         y_target = cube[0, -1, self.band_start:self.band_end, :] 
 
-        # Flatten surface for branch input
-        branch_input = torch.tensor(u_surface, dtype=torch.float32).reshape(-1)
+#         # Flatten surface for branch input
+#         branch_input = torch.tensor(u_surface, dtype=torch.float32).reshape(-1)
 
-        # Full Grid for trunk input
-        nH, nW = y_target.shape
-        maxR, maxH, maxW = cube.shape[1:]
-        h = np.arange(nH, dtype=np.float32)/(nH-1)
-        w = np.arange(nW, dtype=np.float32)/(nW-1)
+#         # Full Grid for trunk input
+#         nH, nW = y_target.shape
+#         maxR, maxH, maxW = cube.shape[1:]
+#         r = np.arange(self.window_start, self.window_start + 1, dtype=np.float32)/(maxR-1)
+#         h = np.arange(nH, dtype=np.float32)/(nH-1)
+#         w = np.arange(nW, dtype=np.float32)/(nW-1)
 
-        Hg, Wg = np.meshgrid(h, w, indexing="ij")
+#         Rg, Hg, Wg = np.meshgrid(r, h, w, indexing="ij")
 
-        coords = np.stack([Hg, Wg], axis=-1).reshape(-1, 2)      # (N,2)
-        target = y_target.reshape(-1).astype(np.float32)            # (N,)
+#         coords = np.stack([Rg, Hg, Wg], axis=-1).reshape(-1, 3)      # (N,3)
+#         target = y_target.reshape(-1).astype(np.float32)            # (N,)
 
-        trunk_input = torch.from_numpy(coords)    # (1, N, 2)
-        target = torch.from_numpy(target)         # (1, N)
+#         trunk_input = torch.from_numpy(coords)    # (1, N, 2)
+#         target = torch.from_numpy(target)         # (1, N)
 
-        return {
-            "branch": 1-branch_input,   # (H * W * C,)
-            "trunk": trunk_input,     # (N, 2)
-            "target": 1-target,          # (N,)
-            # "idx_r": idx_r,
-            # "idx_h": idx_h,
-            # "idx_w": idx_w,
-        }
+#         return {
+#             "branch": 1-branch_input,   # (H * W * C,)
+#             "trunk": trunk_input,     # (N, 2)
+#             "target": 1-target,          # (N,)
+#             # "idx_r": idx_r,
+#             # "idx_h": idx_h,
+#             # "idx_w": idx_w,
+#         }
 
-    def __len__(self):
-        return len(self.sims)
+#     def __len__(self):
+#         return len(self.sims)
 
-    def get_min_max(self):
-        return {"v_min": float(self.v_min), "v_max": float(self.v_max)}
+#     def get_min_max(self):
+#         return {"v_min": float(self.v_min), "v_max": float(self.v_max)}
 
-    def get_grid_points(self):
-        return get_coords(self.sim_paths[0])
+#     def get_grid_points(self):
+#         return get_coords(self.sim_paths[0])
 
-    def get_branch_input_dims(self):
-        C, H, W = self.sims.shape[1], self.sims.shape[3], self.sims.shape[4]
-        # return (C * (self.band_end - self.band_start) * W)
-        return (C * H * W)
+#     def get_branch_input_dims(self):
+#         C, H, W = self.sims.shape[1], self.sims.shape[3], self.sims.shape[4]
+#         # return (C * (self.band_end - self.band_start) * W)
+#         return (C * H * W)
         
-    def get_trunk_input_dims(self):
-        return 3  # r, theta, phi
+#     def get_trunk_input_dims(self):
+#         return 3  # r, theta, phi
 
 
 if __name__ == "__main__":
@@ -176,20 +180,21 @@ if __name__ == "__main__":
         print(f'H: {H}, W: {W}')
         for batch in tqdm(val_loader):
             u = batch["branch"].to(device)     # (B, C*H*W)   or (B, D_branch)
-            coords = batch["trunk"][0].to(device) # ( N, 2)    or sometimes (N, 2) broadcasted
+            coords = val_dataset.get_coords_grid().to(device)# ( N, 3)    or sometimes (N, 3) broadcasted
             if first:
                 with open('/app/src/DeepONetBand/debug.txt', 'w') as f:
                     f.write(str(coords))
                 first = False
             y_true = batch["target"].to(device) # (B, N)
-            
-            B, N_points = y_true.shape
-            print(f'B: {B}, N: {N_points}')
+            # print(y_true.shape)
+            B = u.shape[0]
+            N_points, _ = coords.shape
+            # print(f'B: {B}, N: {N_points}')
             # coords = coords.reshape(-1, coords.shape[-1])    # [N_points, 3]
             u = u.reshape(B, -1)
-            y_true = y_true.reshape(-1, 1)                        # [B*N_points, 1]
+            # y_true = y_true.reshape(-1, 1)                        # [B*N_points, 1]
             
-            pred = model((u, coords))            # [B*N_points, 1]
+            pred = model((u, coords[None,...]))             # [B*N_points, 1]
             pred = pred.view(B, N_points)       # (B, N)
             
             

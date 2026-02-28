@@ -1,25 +1,13 @@
 import itertools
 import numpy as np
 import os
-import json
-import toml
-import datetime
-import matplotlib.pyplot as plt
-import seaborn as sns
-from tqdm import tqdm
-import argparse
-from copy import deepcopy
-
-import torch
-import torch.nn as nn
-import torch.optim as optim
 from torch.utils.data import DataLoader
+import torch
+from copy import deepcopy
+from tqdm import tqdm
 import wandb
-from accelerate import Accelerator
-import sys
-sys.path.append('/app')
-sys.path.append('..')
-
+import torch.optim as optim
+import torch.nn as nn
 from utils.metrics import (
     mse_score_masked, mssim_score, mse_score, acc_score, psnr_score, sobel_edge_map
 )
@@ -28,14 +16,15 @@ AVAILABLE_METRICS_DICT= {'loss': None, 'MSE': mse_score, 'MSE_MASKED': mse_score
 def update_running_metric(metrics_list, running_dict, loss, real_y, real_pred, batch_size_local, accelerator):
     for k in metrics_list:
         if k == 'loss':
-            metric_val = loss
+            metric_val = loss  # tensor already
         elif k == 'MSE_MASKED':
             metric_val = AVAILABLE_METRICS_DICT[k](real_y, real_pred, sobel_edge_map(real_y))
             metric_val = metric_val * batch_size_local
         else:
             metric_val = AVAILABLE_METRICS_DICT[k](real_y, real_pred)
             metric_val = metric_val * batch_size_local
-        
+
+        # ---- FIX: don't wrap tensors with torch.tensor(...) ----
         if torch.is_tensor(metric_val):
             metric_tensor = metric_val.detach()
             if metric_tensor.device != real_y.device:
@@ -45,6 +34,7 @@ def update_running_metric(metrics_list, running_dict, loss, real_y, real_pred, b
 
         gathered = accelerator.gather_for_metrics(metric_tensor)
         running_dict[k] += gathered.sum().item()
+
     return running_dict
 
 def get_epoch_metric(metrics_list, running_dict, dataset_size, prefix='train'):
@@ -81,21 +71,30 @@ def train(
     assert len(set(metrics_list) - set(AVAILABLE_METRICS_DICT.keys())) == 0, f"metrics_list can only contain {list(AVAILABLE_METRICS_DICT.keys())}"
     batch_size, n_epochs = wandb_params["batch_size"], wandb_params["num_epochs"]
     lr, weight_decay = wandb_params["learning_rate"], wandb_params["weight_decay"]
-     
+
+    # gen_cpu = torch.Generator(device="cuda")
+    # gen_cpu.manual_seed(42)  # optional, for reproducibility    # Make DataLoaders use CPU RNG to avoid device mismatch
+    
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=False,
+        # pin_memory=False,
+        # generator=gen_cpu,
     )
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
+        # pin_memory=False,
+        # generator=gen_cpu,
     )
 
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     model, optimizer, train_loader, test_loader = accelerator.prepare(model, optimizer, train_loader, test_loader)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=12, min_lr=1e-6)
+    # autocast_device_type = "cuda" if "cuda" in device.type else "cpu"
+    # scaler = torch.amp.GradScaler(device=autocast_device_type)
 
     best_test_loss = float("inf")
     best_epoch = -1
@@ -114,54 +113,57 @@ def train(
         # -------------------- TRAIN --------------------
         model.train()
         running_metrics = {metric: 0.0 for metric in metrics_list}
-        train_dataset.reset_window_start()
-        for window_start in range(train_dataset.window_start, train_dataset.maxR, train_dataset.window_step):
-            train_dataset.set_window_start(window_start)
-            accelerator.wait_for_everyone()
 
-            coords = train_dataset.get_coords_grid().to(accelerator.device)
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{n_epochs} [Train]", leave=False):
+            u = batch["branch"]                                   # (B, C, H, W)
+            coords = batch["trunk"][0]                               # (N, 3)
+            y_true = batch["target"]                              # (B, N)
+            
+            # with open('/app/src/DeepONetBand/debug.txt', 'a') as f:
+                # f.write(f'U: {u.shape}\ncoords: {coords.shape}\ny_true: {y_true.shape}')
+            
+            optimizer.zero_grad(set_to_none=True)
+            B, C = u.shape[:2]
+            H, W = 56, 128
+            N_points, coord_dim = coords.shape
 
-            for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{n_epochs} [Train]", leave=False):
-                u = batch["branch"]                                   # (B, C*H*W)   or (B, D_branch)
-                # coords = batch["trunk"][0]                               # (B, N, 3)    or sometimes (N, 3) broadcasted
-                y_true = batch["target"]                              # (B, N)
-                
-                optimizer.zero_grad(set_to_none=True)
-                B = u.shape[0]
-                H, W = 56, 128
-                with open('/app/src/DeepONetBand/debug.txt', 'w') as f:
-                    f.write(f'U: {u.shape}\ncoords: {coords.shape}\ny_true: {y_true.shape}')
-                
-                N_points = coords.shape[0]
+            # flatten for DeepXDE
+            # coords = coords.reshape(B * N_points, coord_dim)  # (B*N, 2)
+            u = u.reshape(B, -1)
+            # u = u.unsqueeze(1).expand(-1, N_points, -1)  # (B, N, H*W)
+            # u = u.reshape(B * N_points, -1)  # (B*N, H*W)
+            # y_true = y_true.reshape(B * N_points, 1)  # (B*N, 1)
 
-                # flatten for DeepXDE
-                # coords_flat = coords.reshape(-1, coords.shape[-1])    # [B*N_points, 3]
-                u = u.reshape(B, -1)
-                # u_repeat = u.repeat_interleave(N_points, dim=0)       # [B*N_points, D_branch]
-                # y_flat = y_true.reshape(-1, 1)                        # [B*N_points, 1]
-                with accelerator.autocast():
-                    pred = model((u, coords[None,...]))            # [B*N_points, 1]
-                    y_true = y_true.reshape(B, 1,H, W)         # (B, N)
-                    pred = pred.view(B, 1,H, W)       # (B, N)
-                    loss = loss_fn(pred, y_true)
-                # batch_climatology = climatology[batch["idx_r"].to(device), batch["idx_h"].to(device), batch["idx_w"].to(device)].view(B,-1).to(device)
-                accelerator.backward(loss)
-                optimizer.step()
+            # coords = coords.reshape(-1, coords.shape[-1])    # [B*N_points, 3]
+            # u = u.repeat_interleave(N_points, dim=0)       # [B*N_points, D_branch]
+            # y_true = y_true.reshape(-1, 1)                        # [B*N_points, 1]
 
-                # bookkeeping
-                cur_loss = loss.detach() * y_true.size(0)
+            with accelerator.autocast():
+                pred = model((u, coords))            # [B*N_points, 1]
+                # pred = pred.view(B, N_points)       # (B, N)
+                y_true   = y_true.reshape(B,1,H, W)   # (B, N)
+                pred = pred.squeeze(-1).reshape(B, 1, H, W)
+                loss = loss_fn(pred, y_true)
+            # batch_climatology = climatology[batch["idx_r"].to(device), batch["idx_h"].to(device), batch["idx_w"].to(device)].view(B,-1).to(device)
+            accelerator.backward(loss)
+            optimizer.step()
 
-                # ---- denormalize for metrics (matches your code path) ----
-                y_true   = y_true * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
-                pred= pred    * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
-                y_true   = y_true * 481.3711
-                pred= pred * 481.3711
+            # bookkeeping
+            cur_loss = loss.detach() * y_true.size(0)
 
-                running_metrics = update_running_metric(metrics_list, running_metrics, cur_loss, y_true, pred, y_true.size(0), accelerator)
-        train_epoch_metrics = get_epoch_metric(metrics_list, running_metrics, len(train_loader.dataset)*train_dataset.num_windows, prefix='train')
+            # ---- denormalize for metrics (matches your code path) ----
+            y_true   = y_true * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
+            pred= pred    * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
+            y_true   = y_true * 481.3711
+            pred= pred * 481.3711
+            
+            
+            running_metrics = update_running_metric(metrics_list, running_metrics, cur_loss, y_true, pred, y_true.size(0), accelerator)
+    
+        train_epoch_metrics = get_epoch_metric(metrics_list, running_metrics, len(train_loader.dataset), prefix='train')
         wandb_dict.update(train_epoch_metrics)
 
-        up date_metrics_list_dict(metrics_list, train_metrics_dict, train_epoch_metrics)
+        update_metrics_list_dict(metrics_list, train_metrics_dict, train_epoch_metrics)
 
         # Step LR on validation loss later; here we could step on train loss, but val is better
         # scheduler.step(epoch_train_loss)
@@ -171,47 +173,44 @@ def train(
 
         running_metrics = {metric: 0.0 for metric in metrics_list}
         
-        test_dataset.reset_window_start()
         with torch.no_grad():
-            for test_window_start in range(test_dataset.window_start, test_dataset.maxR, test_dataset.window_step):
-                test_dataset.set_window_start(test_window_start)
-                accelerator.wait_for_everyone()
+            for batch in tqdm(test_loader, desc=f"Epoch {epoch+1}/{n_epochs} [Val]", leave=False):
+                u = batch["branch"]
+                coords = batch["trunk"][0]
+                y_true = batch["target"]
+                H, W = 56, 128
+                N_points, _ = coords.shape
 
-                coords = test_dataset.get_coords_grid().to(accelerator.device)
+                # flatten for DeepXDE
+                # coords = coords.reshape(B * N_points, coord_dim)  # (B*N, 2)
+                u = u.reshape(B, -1)
+                # u = u.unsqueeze(1).expand(-1, N_points, -1)  # (B, N, H*W)
+                # u = u.reshape(B * N_points, -1)  # (B*N, H*W)
 
-                for batch in tqdm(test_loader, desc=f"Epoch {epoch+1}/{n_epochs} [Val]", leave=False):
-                    u = batch["branch"]
-                    # coords = batch["trunk"][0]
-                    y_true = batch["target"]
-                    
-                    B = u.shape[0]
-                    H, W = 56, 128
-                    N_points, _ = coords.shape
+                # y_true = y_true.reshape(B * N_points, 1)  # (B*N, 1)
 
-                    # flatten for DeepXDE
-                    # coords_flat = coords.reshape(-1, coords.shape[-1])    # [B*N_points, 3]
-                    # u_repeat = u.repeat_interleave(N_points, dim=0)       # [B*N_points, D_branch]
-                    # y_flat = y_true.reshape(-1, 1)                        # [B*N_points, 1]
-                    
-                    u = u.reshape(B, -1)
+                # coords = coords.reshape(-1, coords.shape[-1])    # [B*N_points, 3]
+                # u = u.repeat_interleave(N_points, dim=0)       # [B*N_points, D_branch]
+                # y_true = y_true.reshape(-1, 1)                        # [B*N_points, 1]
+                with accelerator.autocast():
+                    pred = model((u, coords))            # [B*N_points, 1]
+                    # pred = pred.view(B, N_points)       # (B, N)
+                    y_true   = y_true.reshape(B, 1, H, W)   # (B, N)
+                    pred = pred.squeeze(-1).reshape(B, 1, H, W)
+                    loss = loss_fn(pred, y_true)
 
-                    with accelerator.autocast():
-                        pred = model((u, coords[None,...]))            # [B*N_points, 1]
-                        y_true   = y_true.reshape(B, 1, H, W)     # (B, N)
-                        pred = pred.reshape(B, 1, H, W)
-                        loss = loss_fn(pred, y_true)
+                cur_loss= loss.detach() * y_true.size(0)
 
-                    cur_loss= loss.detach() * y_true.size(0)
+                # val_loss_sum += loss.item() * y_true.size(0)
+                # batch_climatology = climatology[batch["idx_r"].to(device), batch["idx_h"].to(device), batch["idx_w"].to(device)].view(1,B,-1).to(device)
+                y_true   = y_true * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
+                pred= pred    * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
+                y_true   = y_true * 481.3711
+                pred= pred * 481.3711
+                
+                running_metrics = update_running_metric(metrics_list, running_metrics, cur_loss, y_true, pred, y_true.size(0), accelerator)
 
-                    # val_loss_sum += loss.item() * y_true.size(0)
-                    # batch_climatology = climatology[batch["idx_r"].to(device), batch["idx_h"].to(device), batch["idx_w"].to(device)].view(1,B,-1).to(device)
-                    y_true      = y_true * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
-                    pred        = pred    * (train_dataset.v_max - train_dataset.v_min) + train_dataset.v_min
-                    y_true      = y_true * 481.3711
-                    pred        = pred * 481.3711
-                    
-                    running_metrics = update_running_metric(metrics_list, running_metrics, cur_loss, y_true, pred, y_true.size(0), accelerator)
-        test_epoch_metrics = get_epoch_metric(metrics_list, running_metrics, len(test_loader.dataset)*test_dataset.num_windows, prefix='test')
+        test_epoch_metrics = get_epoch_metric(metrics_list, running_metrics, len(test_loader.dataset), prefix='test')
         wandb_dict.update(test_epoch_metrics)
 
         update_metrics_list_dict(metrics_list, test_metrics_dict, test_epoch_metrics)

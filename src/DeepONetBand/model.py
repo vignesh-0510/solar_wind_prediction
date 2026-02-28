@@ -43,7 +43,7 @@ def initialize_layer(layer, init_type="xavier", activation="tanh"):
         nn.init.zeros_(layer.bias)
 
 class BranchNet(nn.Module):
-    def __init__(self, input_dim=3, hidden_layers=[64,64], K=100):
+    def __init__(self, input_dim=14208, hidden_layers=[64,64], K=100):
         super().__init__()
         layers = []
         dims = [input_dim] + hidden_layers
@@ -107,7 +107,7 @@ class SFNODeepONet(nn.Module):
         branch_input, trunk_input = inputs
         H, W = 56, 128
         N = H * W
-
+        B = branch_input.shape[0]
         # reshape trunk input if needed
         if trunk_input.dim() == 2:
             BN, d = trunk_input.shape
@@ -123,7 +123,7 @@ class SFNODeepONet(nn.Module):
 
         # ---- Reshape for SFNO ----
         z = z.view(B, 56, 128, -1).permute(0, 3, 1, 2)  # (B, K, H, W)
-
+        # print("z shape before SFNO:", z.shape)
         # ---- Spectral decoding ----
         with torch.autocast(device_type="cuda", enabled=False):
             z = self.sfno(z.float())            # (B, C, H, W)

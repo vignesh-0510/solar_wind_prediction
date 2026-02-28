@@ -69,39 +69,41 @@ class DeepONetDataset(SimpleDataset):
         self.trunk_sample_size = trunk_sample_size
         self.band_start = 28
         self.band_end = 84
+        self.window_start = 100
+        self.window_step = 1
+        self.maxR = self.sims.shape[2]
+        self.num_windows = math.ceil((self.maxR-1) / self.window_step)
+
     def __getitem__(self, index):
         cube = self.sims[index]
 
         u_surface = cube[:, 0, :, :]   # (C, H, W)
-        y_target = cube[0, -1, self.band_start:self.band_end, :] 
+        y_target = cube[0, self.window_start, self.band_start:self.band_end, :] 
 
         # Flatten surface for branch input
         # branch_input = torch.as_tensor(u_surface, dtype=torch.float32).reshape(-1)
-        branch_input = torch.as_tensor(u_surface, dtype=torch.float32)
+        u_surface = torch.as_tensor(u_surface, dtype=torch.float32)
 
         # Full Grid for trunk input
-        nR, nH, nW = y_target.shape
-        maxR, maxH, maxW = cube.shape[1:]
-        r = np.arange(maxR, dtype=np.float32)/(maxR-1)
-        h = np.arange(nH, dtype=np.float32)/(nH-1)
-        w = np.arange(nW, dtype=np.float32)/(nW-1)
+        # nH, nW = y_target.shape
+        # maxR, maxH, maxW = cube.shape[1:]
+
+        # r = np.arange(self.window_start, self.window_start + 1, dtype=np.float32)/(maxR-1)
+        # h = np.arange(nH, dtype=np.float32)/(nH-1)
+        # w = np.arange(nW, dtype=np.float32)/(nW-1)
 
 
-        Hg, Wg = np.meshgrid(h, w, indexing="ij")
+        # Rg, Hg, Wg = np.meshgrid(r, h, w, indexing="ij")
 
-        coords = np.stack([Hg, Wg], axis=-1).reshape(-1, 2)      # (N,2)
-        target = y_target.reshape(-1).astype(np.float32)            # (N,)
+        # coords = np.stack([Rg, Hg, Wg], axis=-1).reshape(-1, 3)      # (N,3)
+        y_target = y_target.astype(np.float32)            # (N,)
 
-        trunk_input = torch.from_numpy(coords)    # (1, N, 3)
-        target = torch.from_numpy(target)         # (1, N)
+        # coords = torch.from_numpy(coords)    # (1, N, 3)
+        y_target = torch.from_numpy(y_target)         # (1, N)
 
         return {
-            "branch": 1-branch_input,   # (H * W * C,)
-            "trunk": trunk_input,     # (N, 3)
-            "target": 1-target,          # (N,)
-            # "idx_r": idx_r,
-            # "idx_h": idx_h,
-            # "idx_w": idx_w,
+            "branch": 1-u_surface,   # (H * W * C,)
+            "target": 1-y_target,          # (N,)
         }
 
     def __len__(self):
@@ -109,6 +111,22 @@ class DeepONetDataset(SimpleDataset):
 
     def get_min_max(self):
         return {"v_min": float(self.v_min), "v_max": float(self.v_max)}
+    
+    def set_window_start(self, window_start):
+        self.window_start = window_start
+
+    def reset_window_start(self):
+        self.window_start = 1
+
+    def get_coords_grid(self):
+        nW = self.sims.shape[4]
+        nH = self.band_end - self.band_start
+        r = np.arange(self.window_start, self.window_start + 1, dtype=np.float32)/(self.maxR-1)
+        h = np.arange(nH, dtype=np.float32)/(nH-1)
+        w = np.arange(nW, dtype=np.float32)/(nW-1)
+        Rg, Hg, Wg = np.meshgrid(r, h, w, indexing="ij")
+        coords = np.stack([Rg, Hg, Wg], axis=-1).reshape(-1, 3)      # (N,3)
+        return torch.from_numpy(coords)
 
     def get_grid_points(self):
         return get_coords(self.sim_paths[0])
@@ -119,4 +137,4 @@ class DeepONetDataset(SimpleDataset):
         return (C * H * W)
         
     def get_trunk_input_dims(self):
-        return 2  # r, theta, phi
+        return 3  # r, theta, phi

@@ -1,0 +1,3 @@
+U: torch.Size([4, 1, 111, 128])
+coords: torch.Size([7168, 3])
+y_true: torch.Size([4, 56, 128])

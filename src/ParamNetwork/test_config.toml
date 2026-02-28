@@ -1,0 +1,15 @@
+[train_params]
+data_dir = "/data/solar_wind_pred_vignesh/hdf/medium"
+base_dir = "/data/solar_wind_pred_vignesh"
+batch_size = 10
+data_transform = 'sqrt'
+
+[model_params]
+model_type = 'ParamNetwork'
+scale_up = 1
+job_id = '2026_02_26__060806'
+
+[wandb_params]
+run_name = 'ParamNetwork_SFNO_v1'
+group_name = 'ParamNetwork'
+description = 'SFNO Architecture'
