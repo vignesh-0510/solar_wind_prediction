@@ -15,14 +15,12 @@ from utils.metrics import (
 from initial_param_dataloader import data_inverse_transformation
 
 AVAILABLE_METRICS_DICT= {'loss': None, 'MSE': mse_score, 'MSE_MASKED': mse_score_masked, 'PSNR': psnr_score}
-COMPONENT_LIST = ['vt', 'vp', 'bt', 'bp', 'jt', 'jp', 'jr', 'rho', 'p']
+# COMPONENT_LIST = ['vt', 'vp', 'bt', 'bp', 'jt', 'jp', 'jr', 'rho', 'p']
+COMPONENT_LIST = ['vt', 'vp', 'bt', 'bp']
 
 
 def update_component_running_metric(component_metric_list, real_y, real_pred, batch_size_local, accelerator):
-    # compute component MSE on GPU, but keep it tiny and avoid all_gather
     with torch.no_grad():
-        # real_y, real_pred: (B, 9, H, W)
-        # per-component MSE over batch+spatial -> (9,)
         err2 = (real_y - real_pred).pow(2).mean(dim=(0, 2, 3))  # (9,)
         comp_sum = err2 * batch_size_local                        # (9,)
         comp_sum = accelerator.reduce(comp_sum, reduction="sum")  # (9,)
@@ -45,20 +43,16 @@ def update_running_metric(metrics_list, running_dict, loss, real_y, real_pred, b
             metric_val = AVAILABLE_METRICS_DICT[k](real_y, real_pred)
             metric_val = metric_val * batch_size_local
 
-        # ---- force to a dense CUDA tensor (0-dim) for accelerate gather ----
         if not torch.is_tensor(metric_val):
             metric_val = torch.tensor(metric_val, device=device)
         else:
             metric_val = metric_val.detach()
-            # make sure it's on CUDA
             if metric_val.device != device:
                 metric_val = metric_val.to(device)
-            # make sure it's dense/contiguous
             if metric_val.is_sparse:
                 metric_val = metric_val.to_dense()
             metric_val = metric_val.contiguous()
 
-        # reduce to scalar so gather is tiny
         metric_val = metric_val.sum()
 
         gathered = accelerator.gather_for_metrics(metric_val)
@@ -101,7 +95,8 @@ def train(
     batch_size, n_epochs = wandb_params["batch_size"], wandb_params["num_epochs"]
     lr, weight_decay = wandb_params["learning_rate"], wandb_params["weight_decay"]
     job_id = wandb_params["job_id"]
-
+    l1_lambda = wandb_params.get("l1_lambda", 1e-8)
+    
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -154,7 +149,17 @@ def train(
                 pred = model(x_true)            # [B, 2, H, W]
                 pred = pred.reshape(B, C_out, H, W)
 
-                loss = loss_fn(pred, y_true)
+                data_loss = loss_fn(pred, y_true)
+                if l1_lambda > 0:
+                    l1_penalty = torch.zeros((), device=pred.device)
+                    for p in model.parameters():
+                        if p.requires_grad:
+                            l1_penalty = l1_penalty + p.abs().sum()
+                    loss = data_loss + l1_lambda * l1_penalty
+                else:
+                    l1_penalty = torch.zeros((), device=pred.device)
+                    loss = data_loss
+
             accelerator.backward(loss)
             optimizer.step()
 
@@ -174,9 +179,6 @@ def train(
 
             y_true = data_inverse_transformation(y_true, inverse_transform=train_dataset.inverse_transform, power=train_dataset.inverse_transform_power, scale_metric=481.3711)
             pred = data_inverse_transformation(pred, inverse_transform=train_dataset.inverse_transform, power=train_dataset.inverse_transform_power, scale_metric=481.3711)
-
-            # y_true   = y_true * 481.3711
-            # pred = pred    * 481.3711
             
             running_metrics = update_running_metric(metrics_list, running_metrics, cur_loss, y_true, pred, y_true.size(0), accelerator)
 
@@ -213,9 +215,6 @@ def train(
 
                 y_true = (y_true * v_rng + v_min).detach().cpu()
                 pred   = (pred   * v_rng + v_min).detach().cpu()
-                
-                # y_true   = y_true * 481.3711
-                # pred = pred    * 481.3711
                 
                 y_true = data_inverse_transformation(y_true, inverse_transform=test_dataset.inverse_transform, power=test_dataset.inverse_transform_power, scale_metric=481.3711)
                 pred = data_inverse_transformation(pred, inverse_transform=test_dataset.inverse_transform, power=test_dataset.inverse_transform_power, scale_metric=481.3711)

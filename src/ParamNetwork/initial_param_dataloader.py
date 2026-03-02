@@ -11,7 +11,8 @@ import os
 from neuralop.losses import H1Loss
 import gc
 
-FILE_NAMES = ["vr002.hdf", "br002.hdf", "vt002.hdf", "vp002.hdf", "bt002.hdf", "bp002.hdf", "jt002.hdf", "jp002.hdf", "jr002.hdf", "rho002.hdf", "p002.hdf"]
+# FILE_NAMES = ["vr002.hdf", "br002.hdf", "vt002.hdf", "vp002.hdf", "bt002.hdf", "bp002.hdf", "jt002.hdf", "jp002.hdf", "jr002.hdf", "rho002.hdf", "p002.hdf"]
+FILE_NAMES = ["vr002.hdf", "br002.hdf", "vt002.hdf", "vp002.hdf", "bt002.hdf", "bp002.hdf"]
 
 DEFAULT_INSTRUMENTS = [
     "kpo_mas_mas_std_0101",
@@ -133,13 +134,13 @@ def data_transformation(array, transform='sqrt', power=None):
     array[:,5] = signed_transform(array[:,5], transform=transform, power=power)   # Sign-preserving data transformation
     # JT_0 -> No transformation required
     # JP_0
-    array[:,7] = signed_transform(array[:,7], transform=transform, power=power)   # Sign-preserving data transformation
+    # array[:,7] = signed_transform(array[:,7], transform=transform, power=power)   # Sign-preserving data transformation
     # JR_0
-    array[:,8] = signed_transform(array[:,8], transform=transform, power=power)   # Sign-preserving data transformation
+    # array[:,8] = signed_transform(array[:,8], transform=transform, power=power)   # Sign-preserving data transformation
     # RHO_0 -> No transformation required
     # array[:,9] = signed_sqrt_transform(array[:,9])   # Sign-preserving square root transformation
     # P_0 
-    array[:,10] = signed_transform(array[:,10], transform='pow', power=0.25)   # Sign-preserving POW(0.25) transformation
+    # array[:,10] = signed_transform(array[:,10], transform='pow', power=0.25)   # Sign-preserving POW(0.25) transformation
     return array
 
 
@@ -177,13 +178,13 @@ def data_inverse_transformation(array,inverse_transform, power=None, scale_metri
     array[:, 3] = signed_inverse_transform(array[:, 3], transform=inverse_transform, power=power)   # Sign-preserving inverse transformation
     # JT_0 -> No inverse transformation required
     # JP_0
-    array[:, 5] = signed_inverse_transform(array[:, 5], transform=inverse_transform, power=power)   # Sign-preserving inverse transformation
+    # array[:, 5] = signed_inverse_transform(array[:, 5], transform=inverse_transform, power=power)   # Sign-preserving inverse transformation
     # JR_0
-    array[:, 6] = signed_inverse_transform(array[:, 6], transform=inverse_transform, power=power)   # Sign-preserving inverse transformation
+    # array[:, 6] = signed_inverse_transform(array[:, 6], transform=inverse_transform, power=power)   # Sign-preserving inverse transformation
     # RHO_0 -> No inverse transformation required
     # array[:, 7] = signed_inverse_transform(array[:, 7], transform='square')   # Sign-preserving inverse square transformation
     # P_0 
-    array[:, 8] = signed_inverse_transform(array[:, 8], transform='pow', power=4)   # Sign-preserving inverse POW(4) transformation
+    # array[:, 8] = signed_inverse_transform(array[:, 8], transform='pow', power=4)   # Sign-preserving inverse POW(4) transformation
 
     return array * scale_metric
 
@@ -195,7 +196,8 @@ def set_min_max(array, min_ = None, max_ = None):
         min_ = np.zeros((array.shape[1]))
         max_ = np.zeros((array.shape[1]))
         for i in range(array.shape[1]):
-            if i in {2,3,4,5,7,8,9}:
+            # if i in {2,3,4,5,7,8,9}:
+            if i in {2,3,4,5}:
                 min_[i] = np.min(get_signed_power_transform(array[:, i], power=0.5))
                 max_[i] = np.max(get_signed_power_transform(array[:, i], power=0.5))
             elif i in {10}:

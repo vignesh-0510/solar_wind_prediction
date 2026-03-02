@@ -23,7 +23,7 @@ from utils.save_summary import save_summary
 from utils.losses import L2OperatorLoss
 from neuralop import LpLoss
 from trainer import train, save_training_results_artifacts
-from model import ParamNetwork_v2 as ParamNetwork
+from model import ParamNetwork_v3 as ParamNetwork
 
 def main():
 
@@ -44,6 +44,7 @@ def main():
     data_transform = None if config['train_params']['data_transform'] == False else config['train_params']['data_transform']
 
     model_type = config['model_params']['model_type']
+    operator_type = config['model_params']['operator_type']
     scale_up = config['model_params']['scale_up']
     loss_fn_str = config['model_params']['loss_fn']
     pos_embedding = config['model_params']['pos_embedding']
@@ -127,7 +128,7 @@ def main():
             json.dump(wandb_params, f)
         wandb.login()
 
-    model = ParamNetwork()
+    model = ParamNetwork(operator_type=operator_type)
     run = None
     if enable_wandb_logging and accelerator.is_main_process:
         run = wandb.init(
