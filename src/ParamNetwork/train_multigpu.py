@@ -23,7 +23,7 @@ from utils.save_summary import save_summary
 from utils.losses import L2OperatorLoss
 from neuralop import LpLoss
 from trainer import train, save_training_results_artifacts
-from model import ParamNetwork_v3 as ParamNetwork
+from model import ParamNetwork_v2 as ParamNetwork
 
 def main():
 
@@ -41,13 +41,23 @@ def main():
     batch_size = config['train_params']['batch_size']
     n_epochs = config['train_params']['n_epochs']
     lr = config['train_params']['lr']
-    data_transform = None if config['train_params']['data_transform'] == False else config['train_params']['data_transform']
+    data_transform = config['train_params']['data_transform']
+    gradnorm_alpha = config['train_params']["gradnorm_alpha"]
+    gradnorm_lr = config['train_params']["gradnorm_lr"]
+    use_gradnorm = config['train_params']["use_gradnorm"]
+    resolutions = config['train_params']["resolutions"]
 
     model_type = config['model_params']['model_type']
     operator_type = config['model_params']['operator_type']
     scale_up = config['model_params']['scale_up']
     loss_fn_str = config['model_params']['loss_fn']
     pos_embedding = config['model_params']['pos_embedding']
+    l1_lambda = config['model_params']['l1_lambda']
+    modes = config['model_params']['modes']
+    rank = config['model_params']['rank']
+    conv_module = config['model_params']['conv_module']
+    n_layers = config['model_params']['n_layers']
+    # modes = [int(0.9* m) for m in modes]
 
     wandb_run_name = config['wandb_params']['run_name']
     wandb_group_name = config['wandb_params']['group_name'] 
@@ -57,15 +67,12 @@ def main():
     if pos_embedding == False:
         pos_embedding = None
     
-    cr_dirs = get_cr_dirs(DATA_DIR)
+    cr_dirs = get_cr_dirs(DATA_DIR, resolutions)
+    np.random.seed(42)
+    np.random.shuffle(cr_dirs)
     # cr_train, cr_test = cr_dirs[:split_ix], cr_dirs[split_ix:]
     if enable_wandb_logging:
-        # rng = np.random.default_rng(seed=42)   # reproducible
-        # perm = rng.permutation(len(cr_dirs))
-        # train_idx, test_idx = perm[:split_ix], perm[split_ix:]
-        # cr_train, cr_test = cr_dirs[train_idx].tolist(), cr_dirs[test_idx].tolist()
-        # cr_dirs = cr_dirs.tolist()
-        split_ix = int(len(cr_dirs) * 0.9)
+        split_ix = int(len(cr_dirs) * 0.8)
         cr_train, cr_test = cr_dirs[:split_ix], cr_dirs[split_ix:]
     else:
         cr_train, cr_test = cr_dirs[:32], cr_dirs[32:64]
@@ -76,6 +83,7 @@ def main():
     scale_up=scale_up,
     transform=data_transform,
     pos_embedding=pos_embedding,
+    resolutions = resolutions
     )
     test_dataset = InitialParamDataset(
     DATA_DIR, 
@@ -85,6 +93,8 @@ def main():
     scale_up=scale_up,
     transform=data_transform,
     pos_embedding=pos_embedding,
+    resolutions = resolutions,
+    scale = train_dataset.get_transform_scale()
     )
 
     accelerator = Accelerator()
@@ -122,13 +132,23 @@ def main():
         "scale_up": scale_up,
         'weight_decay': 0.0,
         'job_id': job_id,
+        'l1_lambda': l1_lambda,
+        "modes":modes,
+        'rank': rank,
+        'convolution': conv_module,
+        'n_layers': n_layers,
+        "gradnorm_alpha": gradnorm_alpha,
+        "gradnorm_lr": gradnorm_lr,
+        "use_gradnorm": use_gradnorm,
+        'data_transform': data_transform,
     }
     if accelerator.is_main_process:
         with open(os.path.join(out_path, "cfg.json"), "w", encoding="utf-8") as f:
             json.dump(wandb_params, f)
         wandb.login()
 
-    model = ParamNetwork(operator_type=operator_type)
+    # model = ParamNetwork(operator_type=operator_type, n_modes=(165,192))
+    model = ParamNetwork(operator_type=operator_type, n_modes=(modes[0], modes[1]), rank=rank, n_layers=n_layers, convolution=conv_module, domain_padding=0)
     run = None
     if enable_wandb_logging and accelerator.is_main_process:
         run = wandb.init(
@@ -136,11 +156,9 @@ def main():
             group=run_params['group_name'],
             config=wandb_params
         )
-        save_summary(os.path.join(out_path, "model_summary.txt"), model, input_shape=(2, 2,110,128))    
+        save_summary(os.path.join(out_path, "model_summary.txt"), model, input_shape=(2, 2,109,128))    
     (
-        training_results,
-        best_epoch,
-        best_state_dict,
+        training_results, best_epoch, training_components_results, best_state_dict
     ) = train(
         model,
         train_dataset,
@@ -153,7 +171,6 @@ def main():
     )
 
     if accelerator.is_main_process:
-        torch.save(best_state_dict, os.path.join(out_path, "best_model.pt"))
         if run is not None:
             artifact = wandb.Artifact(
                 name='best_model',
@@ -163,22 +180,7 @@ def main():
             artifact.add_file(os.path.join(out_path, f"best_model.pt"))
             run.log_artifact(artifact)
 
-        filename = f"best_epoch-{best_epoch}.txt"
-        with open(
-            os.path.join(out_path, filename), "w", encoding="utf-8"
-        ) as f:
-            f.write(f"best_epoch: {best_epoch}")
-        if run is not None:
-            artifact = wandb.Artifact(
-                name='best_epoch',
-                type='evaluation',
-                description='epoch with lowest validation loss'
-            )
-            artifact.add_file(os.path.join(out_path, filename))
-            run.log_artifact(artifact)
-
-        save_training_results_artifacts(run, out_path, training_results)
-
+        # save_training_results_artifacts(run, out_path, training_results)
         print("Training completed.")
         wandb.finish()
 

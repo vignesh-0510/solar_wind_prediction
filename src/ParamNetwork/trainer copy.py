@@ -101,62 +101,6 @@ def get_training_results(train_metrics_dict, test_metrics_dict):
     training_results.update({k: np.array(v) for k, v in test_metrics_dict.items()})
     return training_results
 
-def compute_group_losses(pred, y_true, gradnorm_groups, task_names, loss_fn):
-    losses = []
-
-    for task_name in task_names:
-        channel_idx = gradnorm_groups[task_name]
-
-        pred_group = pred[:, channel_idx, :, :]
-        true_group = y_true[:, channel_idx, :, :]
-
-        group_loss = loss_fn(pred_group, true_group)
-        losses.append(group_loss)
-
-    return torch.stack(losses)
-
-def compute_gradnorm_loss(
-    task_losses,
-    task_weights,
-    initial_task_losses,
-    shared_params,
-    alpha=1.5,
-):
-    grad_norms = []
-
-    for i in range(len(task_losses)):
-        weighted_loss = task_weights[i] * task_losses[i]
-
-        grads = torch.autograd.grad(
-            weighted_loss,
-            shared_params,
-            retain_graph=True,
-            create_graph=True,
-            allow_unused=True,
-        )
-
-        grad_norm = torch.zeros((), device=task_losses.device)
-
-        for g in grads:
-            if g is not None:
-                grad_norm = grad_norm + g.norm(2) ** 2
-
-        grad_norm = torch.sqrt(grad_norm + 1e-12)
-        grad_norms.append(grad_norm)
-
-    grad_norms = torch.stack(grad_norms)
-
-    with torch.no_grad():
-        loss_ratios = task_losses.detach() / (initial_task_losses + 1e-12)
-        inverse_train_rates = loss_ratios / loss_ratios.mean()
-
-    mean_grad_norm = grad_norms.mean().detach()
-    target_grad_norms = mean_grad_norm * (inverse_train_rates ** alpha)
-
-    gradnorm_loss = torch.sum(torch.abs(grad_norms - target_grad_norms))
-
-    return gradnorm_loss, grad_norms.detach(), target_grad_norms.detach()
-
 def train(
     model: nn.Module,
     train_dataset,
@@ -178,7 +122,7 @@ def train(
     assert len(set(metrics_list) - set(AVAILABLE_METRICS_DICT.keys())) == 0, f"metrics_list can only contain {list(AVAILABLE_METRICS_DICT.keys())}"
     batch_size, n_epochs = wandb_params["batch_size"], wandb_params["num_epochs"]
     lr, weight_decay = wandb_params["learning_rate"], wandb_params["weight_decay"]
-    gradnorm_alpha,gradnorm_lr, use_gradnorm = wandb_params["gradnorm_alpha"], wandb_params["gradnorm_lr"], wandb_params["use_gradnorm"]
+    gradnorm_alpha, use_gradnorm = wandb_params["gradnorm_alpha"], wandb_params["use_gradnorm"]
     job_id = wandb_params["job_id"]
     l1_lambda = wandb_params.get("l1_lambda", 1e-8)
     
@@ -205,19 +149,12 @@ def train(
 
     task_names = list(gradnorm_groups.keys())
     num_tasks = len(task_names)
-    
-    gradnorm_log_weights = nn.Parameter(torch.zeros(num_tasks, device=accelerator.device))
-    gradnorm_optimizer = optim.Adam([gradnorm_log_weights], lr=gradnorm_lr)
+    gradnorm_log_weights = nn.Parameter(torch.zeros(num_tasks))
+    gradnorm_optimizer = optim.Adam([gradnorm_log_weights], lr=1e-3)
 
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     model, optimizer, gradnorm_optimizer, train_loader, test_loader = accelerator.prepare(model, optimizer, gradnorm_optimizer, train_loader, test_loader)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=8, min_lr=1e-6)
-    common_no = accelerator.unwrap_model(model).common_no
-    trainable_params = [
-        p for p in common_no.parameters()
-        if p.requires_grad and p.ndim > 1
-    ]
-    shared_params = [trainable_params[-1]]  # Select the Last layer of shared parameters
 
     best_test_loss = float("inf")
     best_epoch = -1
@@ -231,9 +168,9 @@ def train(
     train_component_metrics_dict = {f'train_{component}': [] for component in COMPONENT_LIST}
     test_component_metrics_dict = {f'{prefix}_{component}': [] for component in COMPONENT_LIST}
 
-    v_max = torch.from_numpy(train_dataset.v_max[2:]).float().view(1, -1, 1, 1).to(accelerator.device)
-    v_min = torch.from_numpy(train_dataset.v_min[2:]).float().view(1, -1, 1, 1).to(accelerator.device)
-    v_rng = v_max - v_min
+    v_max = torch.from_numpy(train_dataset.v_max[2:]).view(1, -1, 1, 1)
+    v_min = torch.from_numpy(train_dataset.v_min[2:]).view(1, -1, 1, 1)
+    v_rng = (v_max - v_min)
 
     initial_task_losses = None
     for epoch in range(n_epochs):
@@ -259,31 +196,17 @@ def train(
 
             with accelerator.autocast():
                 pred = model(x_true)            # [B, 2, H, W]
+
                 pred = pred.reshape(B,C_out,H,W)
-                
-                computed_task_losses = compute_group_losses(pred, y_true, gradnorm_groups, task_names, loss_fn)
-                
-                if initial_task_losses is None:
-                    initial_task_losses = computed_task_losses.detach()
-            if use_gradnorm:
-                task_weights = num_tasks * torch.softmax(gradnorm_log_weights, dim=0)
-                gradnorm_loss, grad_norms, target_grad_norms = compute_gradnorm_loss(
-                    computed_task_losses,
-                    task_weights,
-                    initial_task_losses,
-                    shared_params,
-                    alpha=gradnorm_alpha,
-                )
-                gradnorm_optimizer.zero_grad(set_to_none=True)
-                accelerator.backward(gradnorm_loss, retain_graph=True)
-                gradnorm_optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-                task_weights = num_tasks * torch.softmax(gradnorm_log_weights, dim=0)
-                
-            else:
-                task_weights = torch.ones(num_tasks, device=computed_task_losses.device)
-            with accelerator.autocast():
-                data_loss = torch.sum(task_weights.detach() * computed_task_losses)
+                task_losses_list = []
+                for task_name in task_names:
+                    channel_idx = gradnorm_groups[task_name]
+                    pred_group = pred[:, channel_idx, :, :]
+                    true_group = y_true[:, channel_idx, :, :]
+                    group_loss = loss_fn(pred_group, true_group)
+                    task_losses_list.append(group_loss)
+                task_losses = torch.stack(task_losses_list)
+
                 # data_loss = loss_fn(pred, y_true)
                 if l1_lambda > 0:
                     l1_penalty = torch.zeros((), device=pred.device)
@@ -300,7 +223,6 @@ def train(
 
             # bookkeeping
             cur_loss = loss.detach()
-
             running_component_metrics = update_component_running_metric(running_component_metrics, y_true, pred, y_true.size(0), accelerator)
 
             # ---- denormalize for metrics ----
@@ -313,8 +235,8 @@ def train(
                 pred   = (pred   * v_rng + v_min).detach().cpu()
             
 
-            y_true = data_inverse_transformation(y_true, inverse_transform=train_dataset.inverse_transform, power=train_dataset.inverse_transform_power, scale_metric=481.3711,scale=train_dataset.scale)
-            pred = data_inverse_transformation(pred, inverse_transform=train_dataset.inverse_transform, power=train_dataset.inverse_transform_power, scale_metric=481.3711,scale=train_dataset.scale)
+            y_true = data_inverse_transformation(y_true, inverse_transform=train_dataset.inverse_transform, power=train_dataset.inverse_transform_power, scale_metric=481.3711)
+            pred = data_inverse_transformation(pred, inverse_transform=train_dataset.inverse_transform, power=train_dataset.inverse_transform_power, scale_metric=481.3711)
             # y_true *= 481.3711
             # pred *= 481.3711
             running_metrics = update_running_metric(metrics_list, running_metrics, cur_loss, y_true, pred, y_true.size(0), train_dataset.data_min[2:], train_dataset.data_max[2:], train_dataset.climatology, accelerator)
@@ -324,13 +246,7 @@ def train(
         
         train_epoch_component_metrics = get_epoch_metric(COMPONENT_LIST, running_component_metrics, len(train_loader.dataset), prefix='train')
         wandb_dict.update(train_epoch_component_metrics)
-        if use_gradnorm and accelerator.is_main_process:
-            current_weights = (num_tasks * torch.softmax(gradnorm_log_weights.detach().cpu(), dim=0)).numpy()
-            for task_name, weight in zip(task_names, current_weights):
-                wandb_dict[f"gradnorm_weight_{task_name}"] = weight
-            for task_name, task_loss in zip(task_names, computed_task_losses.detach().cpu()):
-                wandb_dict[f"train_group_loss_{task_name}"] = float(task_loss)
-
+        
         update_metrics_list_dict(metrics_list, train_metrics_dict, train_epoch_metrics)
         update_metrics_list_dict(COMPONENT_LIST, train_component_metrics_dict, train_epoch_component_metrics)
 
@@ -364,8 +280,8 @@ def train(
                 y_true = (y_true * v_rng + v_min).detach().cpu()
                 pred   = (pred   * v_rng + v_min).detach().cpu()
                 
-                y_true = data_inverse_transformation(y_true, inverse_transform=test_dataset.inverse_transform, power=test_dataset.inverse_transform_power, scale_metric=481.3711, scale=train_dataset.scale)
-                pred = data_inverse_transformation(pred, inverse_transform=test_dataset.inverse_transform, power=test_dataset.inverse_transform_power, scale_metric=481.3711, scale=train_dataset.scale)
+                y_true = data_inverse_transformation(y_true, inverse_transform=test_dataset.inverse_transform, power=test_dataset.inverse_transform_power, scale_metric=481.3711)
+                pred = data_inverse_transformation(pred, inverse_transform=test_dataset.inverse_transform, power=test_dataset.inverse_transform_power, scale_metric=481.3711)
                 # y_true *= 481.3711
                 # pred *= 481.3711
                 for k in PER_SAMPLE_PER_COMPONENT_METRICS:

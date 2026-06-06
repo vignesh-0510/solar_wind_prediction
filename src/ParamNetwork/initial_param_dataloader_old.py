@@ -17,7 +17,6 @@ import gc
 
 FILE_NAMES = ["vr002.hdf", "br002.hdf", "vt002.hdf", "vp002.hdf", "bt002.hdf", "bp002.hdf", "jt002.hdf", "jp002.hdf", "jr002.hdf", "rho002.hdf", "p002.hdf"]
 # FILE_NAMES = ["vr002.hdf", "br002.hdf", "vt002.hdf", "vp002.hdf", "bt002.hdf", "bp002.hdf"]
-DEFAULT_RESOLUTIONS = ['medium', 'high']
 
 DEFAULT_INSTRUMENTS = [
     "kpo_mas_mas_std_0101",
@@ -66,8 +65,7 @@ def read_sim(sim_path):
         component_dict[comp] = {
             'data': data[:,:, :3],
             'theta': theta,
-            'r': r[:3],
-            'phi': phi,
+            'r': r[:3]
         }
         if comp == 'vp':
             target_r = np.array([r[1]], dtype=r.dtype) # [30.742662]
@@ -76,27 +74,21 @@ def read_sim(sim_path):
             
     return (component_dict, target_r, target_theta, target_phi)
 
-def read_medium_target_grid(medium_ref_path="/data/solar_wind_pred_vignesh/hdf/medium/cr1625/kpo_mas_mas_std_0101"):
-    _, target_r, target_theta, target_phi = read_sim(medium_ref_path)
-
-    return target_r, target_theta, target_phi
-    
 def get_sim(sim_path, scale_up):
     
     component_list = [k.split('002')[0] for k in FILE_NAMES]
-    out,_,_,_= read_sim(sim_path)
-    target_r, target_theta, target_phi = read_medium_target_grid()
+    out, target_r, target_theta, phi = read_sim(sim_path)
+
     final = dict()
     for component in component_list:
         
-        data_old, theta_old, r_old, phi_old = (
+        data_old, theta_old, r_old = (
             out[component]["data"],
             out[component]["theta"],
             out[component]["r"],
-            out[component]["phi"],
         )
         # print(f'{component}: Before Interpolation shape: {data_old.shape}')
-        data_new = interpolate_cube(data_old, phi_old, theta_old, r_old, target_phi, target_theta, target_r)
+        data_new = interpolate_cube(data_old, phi, theta_old, r_old, phi, target_theta, target_r)
         data_new = np.transpose(data_new, (2, 1, 0))  # (r, theta, phi)
         # print(f'{component}: After Interpolation shape: {data_new.shape}')
         final[component] = data_new[0,1:-1,:]
@@ -107,7 +99,7 @@ def get_sim(sim_path, scale_up):
     if scale_up != 1:
         final_component_arr = enlarge_cube(final_component_arr, scale_up)
 
-    return final_component_arr, (target_r, target_theta[1:-1], target_phi)
+    return final_component_arr, (target_r, target_theta[1:-1], phi)
 
 
 def get_sims(sim_paths, scale_up, pos_emb = None):
@@ -144,27 +136,14 @@ def signed_pow_transform(array, power):
 def signed_log_transform(array):
     return np.sign(array) * np.log(np.abs(array)+1)
 
-# def arcsinh_transform(array):
-#     return np.arcsinh(array)
-#     import torch
+def arcsinh_transform(array):
+    return np.arcsinh(array)
 
-def arcsinh_transform(array: np.ndarray, scale: torch.Tensor, eps: float = 1e-16):
-    """
-    Arcsinh transform with component-wise scale.
 
-    x:     tensor of shape (B, C, H, W) or similar
-    scale: tensor of shape (C,) or broadcastable to x
-    """
-    scale = np.asarray(scale, dtype=array.dtype)
+def inverse_arcsinh_transform(array):
+    return np.sinh(array)
 
-    if scale.ndim == 1:
-        if array.ndim == 4:      # (N, C, H, W)
-            scale = scale.reshape(1, -1, 1, 1)
-        elif array.ndim == 3:    # (C, H, W)
-            scale = scale.reshape(-1, 1, 1)
 
-    return np.arcsinh(array / (scale + eps))
- 
 def sinh_arcsinh_transform(array, epsilon=0.0, delta=1.0):
     """
     Sinh-arcsinh transformation.
@@ -178,7 +157,14 @@ def sinh_arcsinh_transform(array, epsilon=0.0, delta=1.0):
     """
     return np.sinh(delta * np.arcsinh(array) - epsilon)
 
-def signed_transform(array, transform='sqrt', power=None, epsilon=0.0, delta=1.0, scale=None):
+
+def inverse_sinh_arcsinh_transform(array, epsilon=0.0, delta=1.0):
+    """
+    Inverse of sinh-arcsinh transformation.
+    """
+    return np.sinh((np.arcsinh(array) + epsilon) / delta)
+
+def signed_transform(array, transform='sqrt', power=None, epsilon=0.0, delta=1.0):
     if transform == 'sqrt':
         return signed_sqrt_transform(array)
     elif transform == 'log':
@@ -186,45 +172,39 @@ def signed_transform(array, transform='sqrt', power=None, epsilon=0.0, delta=1.0
     elif transform == 'pow' and power is not None:
         return signed_pow_transform(array, power)
     elif transform == 'arcsinh':
-        return arcsinh_transform(array, scale=scale)
+        return arcsinh_transform(array)
     elif transform == 'sinh_arcsinh':
         return sinh_arcsinh_transform(array, epsilon=epsilon, delta=delta)
     else:
         raise ValueError("Unsupported transform type or missing power for 'pow' transform.")
 
-def data_transformation(array, transform='sqrt', power=None, epsilon=0.0, delta=1.0, scale=None):  
+def data_transformation(array, transform='sqrt', power=None, epsilon=0.0, delta=1.0):
     """
     :param array: (11, H, W)
     Returns: array after data transformation 
     """
-    if isinstance(transform, str):
-        transform = [transform] * array.shape[1]  # Apply same transform to all channels if a single string is provided
-    elif isinstance(transform, list):
-        assert len(transform) == array.shape[1], "Length of transform list must match number of channels in the array."
-        pass
-    else:
-        raise ValueError("Transform must be either a string or a list of strings.")
-
     # VR_0 -> No transformation required
+    array[:,0] = signed_transform(array[:,0], transform=transform, power=power, epsilon=epsilon, delta=delta)   # Sign-preserving data transformation
     # BR_0 -> No transformation required
+    array[:,1] = signed_transform(array[:,1], transform=transform, power=power, epsilon=epsilon, delta=delta)   # Sign-preserving data transformation
 
     # VT_0
-    array[:,2] = signed_transform(array[:,2], transform=transform[2], power=power, epsilon=epsilon, delta=delta, scale=scale[0])   # Sign-preserving data transformation
+    array[:,2] = signed_transform(array[:,2], transform=transform, power=power, epsilon=epsilon, delta=delta)   # Sign-preserving data transformation
     # VP_0
-    array[:,3] = signed_transform(array[:,3], transform=transform[3], power=power, epsilon=epsilon, delta=delta, scale=scale[1])   # Sign-preserving data transformation
+    array[:,3] = signed_transform(array[:,3], transform=transform, power=power, epsilon=epsilon, delta=delta)   # Sign-preserving data transformation
     # BT_0
-    array[:,4] = signed_transform(array[:,4], transform=transform[4], power=power, epsilon=epsilon, delta=delta, scale=scale[2] )   # Sign-preserving data transformation
+    array[:,4] = signed_transform(array[:,4], transform=transform, power=power, epsilon=epsilon, delta=delta)   # Sign-preserving data transformation
     # BP_0
-    array[:,5] = signed_transform(array[:,5], transform=transform[5], power=power, epsilon=epsilon, delta=delta, scale=scale[3])   # Sign-preserving data transformation
+    array[:,5] = signed_transform(array[:,5], transform=transform, power=power, epsilon=epsilon, delta=delta)   # Sign-preserving data transformation
     # JT_0 -> No transformation required
     # JP_0
-    array[:,7] = signed_transform(array[:,7], transform=transform[7], power=power, epsilon=epsilon, delta=delta, scale=scale[5])   # Sign-preserving data transformation
+    array[:,7] = signed_transform(array[:,7], transform=transform, power=power, epsilon=epsilon, delta=delta)   # Sign-preserving data transformation
     # JR_0
-    array[:,8] = signed_transform(array[:,8], transform=transform[8], power=power, epsilon=epsilon, delta=delta, scale=scale[6])   # Sign-preserving data transformation
+    array[:,8] = signed_transform(array[:,8], transform=transform, power=power, epsilon=epsilon, delta=delta)   # Sign-preserving data transformation
     # RHO_0 -> No transformation required
-    array[:,9] = signed_transform(array[:,9], transform=transform[9], power=power, epsilon=epsilon, delta=delta, scale=scale[7])   # Sign-preserving data transformation
+    array[:,9] = signed_transform(array[:,9], transform=transform, power=power, epsilon=epsilon, delta=delta)   # Sign-preserving data transformation
     # P_0 
-    array[:,10] = signed_transform(array[:,10], transform='pow', power=power, scale=scale[8])   # Sign-preserving POW(0.25) transformation
+    array[:,10] = signed_transform(array[:,10], transform='pow', power=0.25)   # Sign-preserving POW(0.25) transformation
     return array
 
 
@@ -233,26 +213,14 @@ def signed_power_inverse_transform(array, power):
 
 def signed_exp_inverse_transform(array):
     return torch.sign(array) * (torch.exp(torch.abs(array)) - 1)
-# def arcsinh_inverse_transform(array):
-#     return torch.sinh(array)
 
-def arcsinh_inverse_transform(x_tf: torch.Tensor, scale: torch.Tensor):
-    """
-    Inverse of arcsinh transform.
-    """
-    scale = scale.to(x_tf.device, x_tf.dtype)
-
-    if scale.ndim == 1:
-        shape = [1, -1] + [1] * (x_tf.ndim - 2)
-        scale = scale.view(*shape)
-
-    return torch.sinh(x_tf) * scale
+def arcsinh_inverse_transform(array):
+    return torch.sinh(array)
 
 def sinh_arcsinh_inverse_transform(array, epsilon=0.0, delta=1.0):
     return torch.sinh((torch.asinh(array) + epsilon) / delta)
 
-def signed_inverse_transform(array, transform='square', power=None, epsilon=0.0, delta=1.0, scale=None):
-    
+def signed_inverse_transform(array, transform='square', power=None, epsilon=0.0, delta=1.0):
     if transform == 'square':
         return signed_power_inverse_transform(array, power=2)
     elif transform == 'exp':
@@ -260,44 +228,37 @@ def signed_inverse_transform(array, transform='square', power=None, epsilon=0.0,
     elif transform == 'pow' and power is not None:
         return signed_power_inverse_transform(array, power=power)
     elif transform == 'sinh':
-        return arcsinh_inverse_transform(array, scale=scale)
+        return arcsinh_inverse_transform(array)
     elif transform == 'sinh_arcsinh':
         return sinh_arcsinh_inverse_transform(array, epsilon=epsilon, delta=delta)
     else:
         raise ValueError("Unsupported inverse transform type or missing power for 'pow' inverse transform.")
 
-def data_inverse_transformation(array,inverse_transform, power=None, scale_metric=481.3711, epsilon=0.0, delta=1.0, scale=None):
+def data_inverse_transformation(array,inverse_transform, power=None, scale_metric=481.3711, epsilon=0.0, delta=1.0):
     """
     :param array: (9, H, W)  
     Returns: array after data transformation 
     """
-    if isinstance(inverse_transform, str):
-        inverse_transform = [inverse_transform] * array.shape[1]  # Apply same transform to all channels if a single string is provided
-    elif isinstance(inverse_transform, list):
-        assert len(inverse_transform) == array.shape[1], "Length of transform list must match number of channels in the array."
-        pass
-    else:
-        raise ValueError("Transform must be either a string or a list of strings.")
     # VR_0 -> No inverse transformation required
     
     # BR_0 -> No inverse transformation required
     # VT_0
-    array[:, 0] = signed_inverse_transform(array[:, 0], transform=inverse_transform[0], power=power, epsilon=epsilon, delta=delta, scale=scale[0])   # Sign-preserving inverse transformation
+    array[:, 0] = signed_inverse_transform(array[:, 0], transform=inverse_transform, power=power, epsilon=epsilon, delta=delta)   # Sign-preserving inverse transformation
     # VP_0
-    array[:,1] = signed_inverse_transform(array[:, 1], transform=inverse_transform[1], power=power, epsilon=epsilon, delta=delta, scale=scale[1])   # Sign-preserving inverse transformation
+    array[:,1] = signed_inverse_transform(array[:, 1], transform=inverse_transform, power=power, epsilon=epsilon, delta=delta)   # Sign-preserving inverse transformation
     # BT_0
-    array[:, 2] = signed_inverse_transform(array[:, 2], transform=inverse_transform[2], power=power, epsilon=epsilon, delta=delta, scale=scale[2])   # Sign-preserving inverse transformation
+    array[:, 2] = signed_inverse_transform(array[:, 2], transform=inverse_transform, power=power, epsilon=epsilon, delta=delta)   # Sign-preserving inverse transformation
     # BP_0
-    array[:, 3] = signed_inverse_transform(array[:, 3], transform=inverse_transform[3], power=power, epsilon=epsilon, delta=delta, scale=scale[3])   # Sign-preserving inverse transformation
+    array[:, 3] = signed_inverse_transform(array[:, 3], transform=inverse_transform, power=power, epsilon=epsilon, delta=delta)   # Sign-preserving inverse transformation
     # JT_0 -> No inverse transformation required
     # JP_0
-    array[:, 5] = signed_inverse_transform(array[:, 5], transform=inverse_transform[5], power=power, epsilon=epsilon, delta=delta, scale=scale[5])   # Sign-preserving inverse transformation
+    array[:, 5] = signed_inverse_transform(array[:, 5], transform=inverse_transform, power=power, epsilon=epsilon, delta=delta)   # Sign-preserving inverse transformation
     # JR_0
-    array[:, 6] = signed_inverse_transform(array[:, 6], transform=inverse_transform[6], power=power, epsilon=epsilon, delta=delta, scale=scale[6])   # Sign-preserving inverse transformation
+    array[:, 6] = signed_inverse_transform(array[:, 6], transform=inverse_transform, power=power, epsilon=epsilon, delta=delta)   # Sign-preserving inverse transformation
     # RHO_0 -> No inverse transformation required
-    array[:, 7] = signed_inverse_transform(array[:, 7], transform=inverse_transform[7], power=power, epsilon=epsilon, delta=delta, scale=scale[7])   # Sign-preserving inverse square transformation
+    array[:, 7] = signed_inverse_transform(array[:, 7], transform=inverse_transform, power=power, epsilon=epsilon, delta=delta)   # Sign-preserving inverse square transformation
     # P_0 
-    array[:, 8] = signed_inverse_transform(array[:, 8], transform=inverse_transform[8], power=4, scale=scale[8])   # Sign-preserving inverse POW(4) transformation
+    array[:, 8] = signed_inverse_transform(array[:, 8], transform='pow', power=4)   # Sign-preserving inverse POW(4) transformation
 
     return array * scale_metric
 
@@ -338,86 +299,35 @@ def compute_climatology(data: np.ndarray, scale_up) -> np.ndarray:
     return climatology
 
 
-def get_cr_dirs(data_path, resolutions = ['medium', 'high']):
+def get_cr_dirs(data_path):
     """Return list of CR directories (crXXXX) inside data_path."""
     cr_dirs = sorted(
         [
             d
-            for res in resolutions
-            for d in os.listdir(os.path.join(data_path, res))
-            if d.startswith("cr") and os.path.isdir(os.path.join(data_path,res, d))
+            for d in os.listdir(data_path)
+            if d.startswith("cr") and os.path.isdir(os.path.join(data_path, d))
         ]
     )
     return cr_dirs
 
 
-
-def collect_sim_paths(data_path, cr_list, instruments=None, resolutions = None):
+def collect_sim_paths(data_path, cr_list, instruments=None):
     """Collect simulation paths given a list of CR directories."""
     if instruments is None:
         instruments = DEFAULT_INSTRUMENTS
-    resolutions = DEFAULT_RESOLUTIONS if resolutions is None else resolutions
 
     sim_paths = []
     cr_nums = []
-    for res in resolutions:
-        for cr in cr_list:
-            cr_path = os.path.join(data_path, res, cr)
-            for instrument in instruments:
-                instrument_path = os.path.join(cr_path, instrument)
-                if os.path.exists(instrument_path):
-                    sim_paths.append(instrument_path)
-                    cr_nums.append(cr)
+    for cr in cr_list:
+        cr_path = os.path.join(data_path, cr)
+        for instrument in instruments:
+            instrument_path = os.path.join(cr_path, instrument)
+            if os.path.exists(instrument_path):
+                sim_paths.append(instrument_path)
+                cr_nums.append(cr)
     return sim_paths, cr_nums
 
-def get_transform_scale(array, method="std", q=95, eps=1e-8):
-    """
-    array: numpy array or torch tensor with shape (N, C, H, W)
-    returns: torch tensor of shape (C,)
-    """
-    if method is None:
-        return torch.ones(array.shape[1], dtype=torch.float32)
 
-    if isinstance(array, np.ndarray):
-        if method == "std":
-            scale = np.std(array, axis=(0, 2, 3))
-        elif method == "percentile":
-            scale = np.percentile(np.abs(array), q, axis=(0, 2, 3))
-        elif method == "mean":
-            scale = np.mean(np.abs(array), axis=(0, 2, 3))
-        else:
-            raise ValueError(f"Unknown scale method: {method}")
-
-        scale = np.maximum(scale, eps)
-        return torch.tensor(scale, dtype=torch.float32)
-
-    elif isinstance(array, torch.Tensor):
-        if method == "std":
-            scale = torch.std(array, dim=(0, 2, 3))
-        elif method == "percentile":
-            scale = torch.quantile(
-                torch.abs(array).reshape(array.shape[0], array.shape[1], -1),
-                q / 100.0,
-                dim=(0, 2),
-            )
-        elif method == "mean":
-            scale = torch.mean(torch.abs(array), dim=(0, 2, 3))
-        else:
-            raise ValueError(f"Unknown scale method: {method}")
-
-        return torch.clamp(scale, min=eps).float()
-
-    else:
-        raise TypeError(f"Expected numpy array or torch tensor, got {type(array)}")
-
-
-TF_INV_TF_DICT = {
-    'sqrt': 'square',
-    'log': 'exp',
-    'pow': 'pow',
-    'arcsinh': 'sinh',
-    'sinh_arcsinh': 'sinh_arcsinh'
-    }
 class InitialParamDataset(Dataset):
     def __init__(
         self,
@@ -429,24 +339,17 @@ class InitialParamDataset(Dataset):
         scale_up=1,
         pos_embedding = None,
         transform=None,
-        transform_fn = None,
-        resolutions = None,
-        scale = None
+        transform_fn = None
     ):
         super().__init__()
         self.transform = transform
         self.transform_power = None
         self.inverse_transform_power = None
-        if isinstance(transform, list):
-            self.transform = [None, None] + transform
-            self.inverse_transform = [ TF_INV_TF_DICT[tf] for tf in self.transform[2:]]
-            self.transform_power = 0.25
-            self.inverse_transform_power = 4
-        elif transform == 'pow':
+        if transform == 'pow':
             self.inverse_transform = 'pow'
             self.transform_power = 0.5
             self.inverse_transform_power = 2
-        elif transform == 'sqrt':
+        elif transform in {'sqrt', 'log'}:
             self.inverse_transform = 'square'
         elif transform == 'log':
             self.inverse_transform = 'exp'
@@ -454,11 +357,8 @@ class InitialParamDataset(Dataset):
             self.inverse_transform = 'sinh'
         elif transform == 'sinh_arcsinh':
             self.inverse_transform = 'sinh_arcsinh'
-        
-        self.sim_paths, self.cr_mapping = collect_sim_paths(data_path, cr_list, instruments, resolutions)
-        # print(self.sim_paths)
+        self.sim_paths, self.cr_mapping = collect_sim_paths(data_path, cr_list, instruments)
         self.sims = get_sims(self.sim_paths, scale_up, pos_embedding)
-        self.scale = get_transform_scale(self.sims[:, 2:], method='percentile') if scale is None else torch.tensor(scale, dtype=torch.float32)
         self.climatology = compute_climatology(self.sims[:,2:], scale_up)
         print(self.sims.shape)
 
@@ -466,7 +366,8 @@ class InitialParamDataset(Dataset):
         self.r = torch.tensor(r, dtype=torch.float32)
         self.theta = torch.tensor(theta, dtype=torch.float32)
         self.phi = torch.tensor(phi, dtype=torch.float32)
-        self.sims = data_transformation(self.sims, self.transform, power=self.transform_power, scale=self.scale)
+
+        self.sims = data_transformation(self.sims, self.transform, power=self.transform_power)
         self.sims, self.v_min, self.v_max = min_max_normalize(self.sims, v_min, v_max)
 
         self.data_min = torch.tensor([ 4.67303783e-01, -1.58353511e-03, -7.15157911e-02, -3.33132781e-02,
@@ -482,7 +383,6 @@ class InitialParamDataset(Dataset):
         cube = self.sims[index]
 
         C, H, W = cube.shape
-
         return {
             "x": torch.from_numpy(cube[:2]).float(),
             "y": torch.from_numpy(cube[2:]).float(),
@@ -498,6 +398,3 @@ class InitialParamDataset(Dataset):
 
     def get_grid_points(self):
         return get_coords(self.sim_paths[0])
-
-    def get_transform_scale(self):
-        return self.scale
