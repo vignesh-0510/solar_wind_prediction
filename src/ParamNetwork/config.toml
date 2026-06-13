@@ -1,19 +1,29 @@
 [train_params]
-data_dir = "/data/solar_wind_pred_vignesh/hdf/medium"
+data_dir = "/data/solar_wind_pred_vignesh/hdf/"
 base_dir = "/data/solar_wind_pred_vignesh"
-batch_size = 4
+batch_size = 5
 n_epochs = 100
-lr = 1e-3
-data_transform = 'sqrt'
+lr = 1e-4
+data_transform = ['arcsinh', 'sqrt', 'arcsinh', 'arcsinh', 'arcsinh', 'arcsinh', 'arcsinh', 'arcsinh', 'pow']
+gradnorm_alpha = 1.5
+gradnorm_lr = 1e-4
+use_gradnorm = true
+resolutions = ['medium']
 
 [model_params]
 model_type = 'ParamNetwork'
+operator_type = 'local_no'
 scale_up = 1
-loss_fn = 'mse'
-pos_embedding = false
+loss_fn = 'l2'
+pos_embedding = true
+l1_lambda = 1e-8
+modes = [109,128]
+rank = 0.4
+conv_module = 'spherical'
+n_layers=4
 
 [wandb_params]
 enable_wandb_logging = true
-run_name = 'V3_SQRT_transform'
-group_name = 'ParamNetwork'
-description = 'REZA inspired SFNO Architecture with custom signed log transformeration' 
+run_name = 'V2_gradnorm_physical_unit_custom_transform_q95_scale_asinh'
+group_name = 'gradnorm'
+description = 'Test' 

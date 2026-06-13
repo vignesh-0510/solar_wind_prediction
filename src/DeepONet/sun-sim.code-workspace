@@ -1,14 +1,10 @@
 {
-	"folders": [
-		{
-			"path": "../.."
-		},
-		{
-			"path": "../../../../../data/solar_wind_pred_vignesh"
-		},
-		{
-			"path": "../../../../../data/solar_wind_pred_predsci"
-		}
-	],
-	"settings": {}
+    "settings": {
+        "workbench.colorTheme": "Visual Studio Dark"
+    },
+    "folders": [
+        {
+            "path": ".."
+        }
+    ]
 }

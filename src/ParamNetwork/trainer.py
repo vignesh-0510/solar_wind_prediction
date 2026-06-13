@@ -258,11 +258,50 @@ def train(
             C_out,H,W = y_true.shape[1:]
 
             with accelerator.autocast():
-                pred = model(x_true)            # [B, 2, H, W]
-                pred = pred.reshape(B,C_out,H,W)
-                
-                computed_task_losses = compute_group_losses(pred, y_true, gradnorm_groups, task_names, loss_fn)
-                
+                pred = model(x_true)
+                pred = pred.reshape(B, C_out, H, W)
+
+                # --------------------------------------------------
+                # Convert normalized transformed values back to
+                # transformed physical scale first
+                # --------------------------------------------------
+                v_min_local = v_min.to(pred.device)
+                v_rng_local = v_rng.to(pred.device)
+
+                pred_phys = pred * v_rng_local + v_min_local
+                y_true_phys = y_true * v_rng_local + v_min_local
+
+                # --------------------------------------------------
+                # Apply your existing differentiable inverse transform
+                # IMPORTANT: no detach(), no cpu()
+                # --------------------------------------------------
+                pred_phys = data_inverse_transformation(
+                    pred_phys,
+                    inverse_transform=train_dataset.inverse_transform,
+                    power=train_dataset.inverse_transform_power,
+                    scale_metric=481.3711,
+                    scale=train_dataset.scale.to(pred.device),
+                )
+
+                y_true_phys = data_inverse_transformation(
+                    y_true_phys,
+                    inverse_transform=train_dataset.inverse_transform,
+                    power=train_dataset.inverse_transform_power,
+                    scale_metric=481.3711,
+                    scale=train_dataset.scale.to(y_true.device),
+                )
+
+                # --------------------------------------------------
+                # GradNorm losses are now in physical units
+                # --------------------------------------------------
+                computed_task_losses = compute_group_losses(
+                    pred_phys,
+                    y_true_phys,
+                    gradnorm_groups,
+                    task_names,
+                    loss_fn,
+                )
+
                 if initial_task_losses is None:
                     initial_task_losses = computed_task_losses.detach()
             if use_gradnorm:
@@ -283,7 +322,8 @@ def train(
             else:
                 task_weights = torch.ones(num_tasks, device=computed_task_losses.device)
             with accelerator.autocast():
-                data_loss = torch.sum(task_weights.detach() * computed_task_losses)
+                normalized_task_losses = computed_task_losses / (initial_task_losses.detach() + 1e-12)
+                data_loss = torch.sum(task_weights.detach() * normalized_task_losses)
                 # data_loss = loss_fn(pred, y_true)
                 if l1_lambda > 0:
                     l1_penalty = torch.zeros((), device=pred.device)

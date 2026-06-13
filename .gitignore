@@ -1,6 +1,15 @@
 data_fetcher.txt
+sample_cr_data 
+data
 
-
+*.png
+*.pdf
+*.csv
+*.yaml
+*.DS_Store
+*.gitignore
+*.code-workspace
+*.toml
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

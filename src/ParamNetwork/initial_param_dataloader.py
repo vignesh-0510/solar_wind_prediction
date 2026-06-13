@@ -237,9 +237,6 @@ def signed_exp_inverse_transform(array):
 #     return torch.sinh(array)
 
 def arcsinh_inverse_transform(x_tf: torch.Tensor, scale: torch.Tensor):
-    """
-    Inverse of arcsinh transform.
-    """
     scale = scale.to(x_tf.device, x_tf.dtype)
 
     if scale.ndim == 1:
@@ -266,40 +263,61 @@ def signed_inverse_transform(array, transform='square', power=None, epsilon=0.0,
     else:
         raise ValueError("Unsupported inverse transform type or missing power for 'pow' inverse transform.")
 
-def data_inverse_transformation(array,inverse_transform, power=None, scale_metric=481.3711, epsilon=0.0, delta=1.0, scale=None):
+def data_inverse_transformation(array, inverse_transform, power=None, scale_metric=481.3711,
+                                epsilon=0.0, delta=1.0, scale=None):
     """
-    :param array: (9, H, W)  
-    Returns: array after data transformation 
+    Differentiable inverse transform.
+    Input shape: (B, 9, H, W)
+    Output: physical-unit tensor
     """
+
     if isinstance(inverse_transform, str):
-        inverse_transform = [inverse_transform] * array.shape[1]  # Apply same transform to all channels if a single string is provided
+        inverse_transform = [inverse_transform] * array.shape[1]
     elif isinstance(inverse_transform, list):
-        assert len(inverse_transform) == array.shape[1], "Length of transform list must match number of channels in the array."
-        pass
+        assert len(inverse_transform) == array.shape[1], (
+            "Length of inverse_transform list must match number of channels."
+        )
     else:
         raise ValueError("Transform must be either a string or a list of strings.")
-    # VR_0 -> No inverse transformation required
-    
-    # BR_0 -> No inverse transformation required
-    # VT_0
-    array[:, 0] = signed_inverse_transform(array[:, 0], transform=inverse_transform[0], power=power, epsilon=epsilon, delta=delta, scale=scale[0])   # Sign-preserving inverse transformation
-    # VP_0
-    array[:,1] = signed_inverse_transform(array[:, 1], transform=inverse_transform[1], power=power, epsilon=epsilon, delta=delta, scale=scale[1])   # Sign-preserving inverse transformation
-    # BT_0
-    array[:, 2] = signed_inverse_transform(array[:, 2], transform=inverse_transform[2], power=power, epsilon=epsilon, delta=delta, scale=scale[2])   # Sign-preserving inverse transformation
-    # BP_0
-    array[:, 3] = signed_inverse_transform(array[:, 3], transform=inverse_transform[3], power=power, epsilon=epsilon, delta=delta, scale=scale[3])   # Sign-preserving inverse transformation
-    # JT_0 -> No inverse transformation required
-    # JP_0
-    array[:, 5] = signed_inverse_transform(array[:, 5], transform=inverse_transform[5], power=power, epsilon=epsilon, delta=delta, scale=scale[5])   # Sign-preserving inverse transformation
-    # JR_0
-    array[:, 6] = signed_inverse_transform(array[:, 6], transform=inverse_transform[6], power=power, epsilon=epsilon, delta=delta, scale=scale[6])   # Sign-preserving inverse transformation
-    # RHO_0 -> No inverse transformation required
-    array[:, 7] = signed_inverse_transform(array[:, 7], transform=inverse_transform[7], power=power, epsilon=epsilon, delta=delta, scale=scale[7])   # Sign-preserving inverse square transformation
-    # P_0 
-    array[:, 8] = signed_inverse_transform(array[:, 8], transform=inverse_transform[8], power=4, scale=scale[8])   # Sign-preserving inverse POW(4) transformation
 
-    return array * scale_metric
+    if scale is not None:
+        scale = scale.to(array.device, array.dtype)
+
+    channels = []
+
+    for c in range(array.shape[1]):
+        x_c = array[:, c:c+1]
+
+        # JT channel index 4 has no inverse transform in your current logic
+        if c == 4:
+            channels.append(x_c)
+            continue
+
+        # P channel: force inverse power 4
+        if c == 8:
+            x_c = signed_inverse_transform(
+                x_c,
+                transform=inverse_transform[c],
+                power=4,
+                epsilon=epsilon,
+                delta=delta,
+                scale=scale[c:c+1] if scale is not None else None,
+            )
+        else:
+            x_c = signed_inverse_transform(
+                x_c,
+                transform=inverse_transform[c],
+                power=power,
+                epsilon=epsilon,
+                delta=delta,
+                scale=scale[c:c+1] if scale is not None else None,
+            )
+
+        channels.append(x_c)
+
+    array_out = torch.cat(channels, dim=1)
+
+    return array_out * scale_metric
 
 def min_max_normalize(array, min_=None, max_=None):
     if min_ is None or max_ is None:

@@ -13,6 +13,7 @@ from tqdm import tqdm
 from torch.serialization import add_safe_globals
 from neuralop.layers.spherical_convolution import SphericalConv
 from neuralop.layers.spectral_convolution import SpectralConv
+import wandb
 
 from initial_param_dataloader import data_inverse_transformation
 
@@ -35,6 +36,28 @@ LABEL_CONFIG = {
     "p": {"cmap": "inferno"}
     }
 
+def load_minmax_from_wandb(run_id=None):
+    entity = os.environ["WANDB_ENTITY"]
+    project = os.environ["WANDB_PROJECT"]
+
+    run_path = f"{entity}/{project}/{run_id}"
+
+    api = wandb.Api()
+    run = api.run(run_path)
+
+    if "v_min" in run.config and "v_max" in run.config:
+        v_min = np.array(run.config["v_min"], dtype=np.float32)
+        v_max = np.array(run.config["v_max"], dtype=np.float32)
+        return v_min, v_max
+
+    if "v_min" in run.summary and "v_max" in run.summary:
+        v_min = np.array(run.summary["v_min"], dtype=np.float32)
+        v_max = np.array(run.summary["v_max"], dtype=np.float32)
+        return v_min, v_max
+
+    raise KeyError(
+        f"Could not find v_min and v_max in W&B run config/summary: {run_path}"
+    )
 
 if __name__ == "__main__":
     with open('/app/src/ParamNetwork/test_config.toml', 'r') as f:
@@ -53,12 +76,9 @@ if __name__ == "__main__":
     rank = config['model_params']['rank']
     conv_module = config['model_params']['conv_module']
     n_layers = config['model_params']['n_layers']
-    # modes = [int(0.9* m) for m in modes]
-
-    # cr_dirs = get_cr_dirs(DATA_DIR)
-    # split_ix = int(len(cr_dirs) * 0.8)
-    # cr_train, cr_val = cr_dirs[:10], cr_dirs[split_ix:]
-    # cr_val = cr_val[::len(cr_val)//10] # select 10 CRs for validation
+    
+    run_id = config['wandb_params']['run_id']
+    
 
     cr_dirs = get_cr_dirs(DATA_DIR)
     np.random.seed(42)
@@ -69,39 +89,11 @@ if __name__ == "__main__":
     # cr_test = cr_train[:3] + ['cr1653', 'cr2136', 'cr2113']
     train_dataset = InitialParamDataset(DATA_DIR, cr_train, scale_up=scale_up, transform=data_transform) 
     
-    # v_min = np.array([0.4673037827014923,-0.0015835351077839732,-0.2674243748188019,-0.18251925706863403,-0.01134585216641426,-0.01673569716513157])
-    # v_max = np.array([1.3710671663284302,0.0016776990378275514, 0.2680066227912903,0.2556886076927185,0.00924575049430132,0.01659783162176609])  
-    
-    # v_min = np.array([
-    #   0.5253125909845469,
-    #   -0.0012796911178156734,
-    #   -0.05815408928045048,
-    #   -0.05796439533491584,
-    #   -0.0001395168969775543,
-    #   -0.00029267422885021784,
-    #   -0.00032836872729828475,
-    #   -0.000754016163274052,
-    #   -0.00014365064532940978,
-    #   0.0012027198617932807,
-    #   0.019939479342650147
-    # ])
-    # v_max = np.array([
-    #   1.3576756214317167,
-    #   0.0013951159198768437,
-    #   0.056263231875067425,
-    #   0.032770414352875366,
-    #   0.00011488109877281664,
-    #   0.0002804853842485295,
-    #   0.0003168233094889714,
-    #   0.0006403948336432096,
-    #   0.0001303918034627542,
-    #   0.0031488546763667603,
-    #   0.024903301661084735
-    # ])  
-    # v_min = np.array([0.524378108163762,-0.001348877209238708,-0.24470042707927625,-0.2556886030269861,-0.012578425335678742,-0.017108976069037607,-0.00033696375612635165,-0.02746453176230876,-0.011985865157650152,0.0012027198617932807,0.01991834035137045])
-    # v_max = np.array([1.3576756214317167,0.0013951159198768437,0.2483787719121463,0.18251925407702943,0.010718567901496698,0.016885075549743434,0.0003168233094889714,0.028310467801176072,0.01227574833623756,0.0031521443600547425,0.024903301661084735])  
     v_min = np.array([0.5253125909845469,-0.0012796911178156734,-3.7269550673475145,-0.2442893071431266,-4.513621076110547,-2.093753262112496,-0.00032836872729828475,-3.14856740955965,-3.131705103104508,0.16417273047122638,0.019939479342650147])
     v_max = np.array([1.3568796600180182,0.0013951159198768437,3.718144036639526,0.18251925407702943,4.319377730937356,2.052534422059117,0.0003168233094889714,2.9858913779500904,3.0352640559348187,0.9682336564135958,0.024903301661084735])  
+    v_min, v_max = load_minmax_from_wandb(run_id=run_id)
+    print("Loaded v_min from W&B:", v_min)
+    print("Loaded v_max from W&B:", v_max)
     test_dataset = InitialParamDataset(
         DATA_DIR,
         cr_test,
