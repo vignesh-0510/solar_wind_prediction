@@ -12,7 +12,8 @@ import pickle as pkl
 from utils.metrics import (
     mse_score_masked, mssim_score, mse_score, acc_score, psnr_score, sobel_edge_map, compute_similarity_components, compute_image_metrics, psnr_score_per_sample_per_component, psnr_score_per_sample
 )
-from initial_param_dataloader import data_inverse_transformation
+from initial_param_dataloader import data_inverse_transformation, cgs_unit_converter
+from physics_constraints import radial_current_physics_loss, positivity_constraint_loss, implied_temperature_loss, get_temp_code_factor
 
 AVAILABLE_METRICS_DICT= {
     'loss': None,
@@ -31,7 +32,19 @@ AVAILABLE_METRICS_DICT= {
 PER_SAMPLE_PER_COMPONENT_METRICS = ['MSE','PSNR','UQI', 'NNSE', 'EMV', 'ACC']
 COMPONENT_LIST = ['vt', 'vp', 'bt', 'bp', 'jt', 'jp', 'jr', 'rho', 'p']
 # COMPONENT_LIST = ['vt', 'vp', 'bt', 'bp']
-
+MAS_TO_CGS = np.array([
+    4.813711e7,     # VR_0   cm/s
+    2.2068908,      # BR_0   G
+    4.813711e7,     # VT_0   cm/s
+    4.813711e7,     # VP_0   cm/s
+    2.2068908,      # BT_0   G
+    2.2068908,      # BP_0   G
+    0.07558,        # JT_0   statA/cm^2
+    0.07558,        # JP_0   statA/cm^2
+    0.07558,        # JR_0   statA/cm^2
+    1.6726e-16,     # RHO_0  g/cm^3
+    0.3875717,      # P_0    dyn/cm^2
+], dtype=np.float32)
 
 def update_component_running_metric(component_metric_list, real_y, real_pred, batch_size_local, accelerator):
     with torch.no_grad():
@@ -100,6 +113,7 @@ def get_training_results(train_metrics_dict, test_metrics_dict):
     training_results = {k: np.array(v) for k, v in train_metrics_dict.items()}
     training_results.update({k: np.array(v) for k, v in test_metrics_dict.items()})
     return training_results
+
 
 def compute_group_losses(pred, y_true, gradnorm_groups, task_names, loss_fn):
     losses = []
@@ -214,7 +228,7 @@ def train(
     wandb_params: dict = None,
     run=None,
     metrics_list = ['loss', 'MSE_MASKED', 'MSSSIM', 'VIF', 'FSIM', 'MSE','PSNR','UQI', 'NNSE', 'EMV', 'ACC'],
-    # metrics_list = ['loss','MSE', 'MSE_MASKED', 'PSNR'],
+    # metrics_list = ['loss','MSE', 'PSNR'],
     out_path = None,
     cv_mode=False
 ):
@@ -228,6 +242,7 @@ def train(
     gradnorm_alpha,gradnorm_lr, use_gradnorm = wandb_params["gradnorm_alpha"], wandb_params["gradnorm_lr"], wandb_params["use_gradnorm"]
     job_id = wandb_params["job_id"]
     l1_lambda = wandb_params.get("l1_lambda", 1e-8)
+    jr_lambda, positivity_lambda, temperature_lambda = wandb_params.get("J_curl_lambda", 1e-4), wandb_params.get("positivity_lambda", 1e-6), wandb_params.get("temperature_lambda", 1e-6)
     
     prefix = 'test' if not cv_mode else 'val'
     
@@ -295,20 +310,21 @@ def train(
         
             x_true = batch["x"]                                   # (B, 2, H, W)                           
             y_true = batch["y"]                                   # (B, 9, H, W)
-            
+            temp_mas = batch["temp"]                      # (B, H, W)
+
             optimizer.zero_grad(set_to_none=True)
             B, C_in= x_true.shape[:2]
             C_out,H,W = y_true.shape[1:]
 
             with accelerator.autocast():
-                pred = model(x_true)
-                pred = pred.reshape(B, C_out, H, W)
+                pred_norm = model(x_true)
+                pred_norm = pred_norm.reshape(B, C_out, H, W)
 
                 # --------------------------------------------------
                     # GradNorm losses in normalized transformed scale
                     # pred and y_true are still normalized dataset values
                     # --------------------------------------------------
-                computed_task_losses = compute_group_losses(pred,
+                computed_task_losses = compute_group_losses(pred_norm,
                     y_true,
                     gradnorm_groups,
                     task_names,
@@ -335,47 +351,76 @@ def train(
                 
             else:
                 task_weights = torch.ones(num_tasks, device=computed_task_losses.device)
-            with accelerator.autocast():
-                normalized_task_losses = computed_task_losses / (initial_task_losses.detach() + 1e-12)
-                data_loss = torch.sum(task_weights.detach() * normalized_task_losses)
-                # data_loss = loss_fn(pred, y_true)
-                if l1_lambda > 0:
-                    l1_penalty = torch.zeros((), device=pred.device)
-                    for p in model.parameters():
-                        if p.requires_grad:
-                            l1_penalty = l1_penalty + p.abs().sum()
-                    loss = data_loss + l1_lambda * l1_penalty
-                else:
-                    l1_penalty = torch.zeros((), device=pred.device)
-                    loss = data_loss
 
-            accelerator.backward(loss)
-            optimizer.step()
-
-            # bookkeeping
-            cur_loss = loss.detach()
-
-            running_component_metrics = update_component_running_metric(running_component_metrics, y_true, pred, y_true.size(0), accelerator)
+            running_component_metrics = update_component_running_metric(running_component_metrics, y_true, pred_norm, y_true.size(0), accelerator)
 
             # ---- denormalize for metrics ----
             
-            with torch.no_grad():
-                y_true = undo_dataset_normalization(
-                    y_true,
-                    train_dataset,
-                    accelerator
-                ).detach().cpu()
+            
+            y_true = undo_dataset_normalization(
+                y_true,
+                train_dataset,
+                accelerator
+            )
 
-                pred = undo_dataset_normalization(
-                    pred,
-                    train_dataset,
-                    accelerator
-                ).detach().cpu()
+            pred = undo_dataset_normalization(
+                pred_norm,
+                train_dataset,
+                accelerator
+            )
 
-            y_true = data_inverse_transformation(y_true, inverse_transform=train_dataset.inverse_transform, power=train_dataset.inverse_transform_power, scale_metric=481.3711,scale=train_dataset.scale)
-            pred = data_inverse_transformation(pred, inverse_transform=train_dataset.inverse_transform, power=train_dataset.inverse_transform_power, scale_metric=481.3711,scale=train_dataset.scale)
-            # y_true *= 481.3711
-            # pred *= 481.3711
+            y_true = data_inverse_transformation(y_true, inverse_transform=train_dataset.inverse_transform, power=train_dataset.inverse_transform_power, unit_scale=None, scale=train_dataset.scale)
+            pred = data_inverse_transformation(pred, inverse_transform=train_dataset.inverse_transform, power=train_dataset.inverse_transform_power, unit_scale=None, scale=train_dataset.scale)            
+
+            implied_temp_loss = implied_temperature_loss(pred, temp_mas, reduction="mean")
+
+            y_true = cgs_unit_converter(y_true)
+            pred = cgs_unit_converter(pred)
+
+            normalized_task_losses = computed_task_losses / (initial_task_losses.detach() + 1e-12)
+            data_loss = torch.sum(task_weights.detach() * normalized_task_losses)
+            
+            jr_loss, physics_diagnostics = radial_current_physics_loss(pred, train_dataset.theta, train_dataset.phi, r_solar=30.0, reduction="mean", relative=True, eps=1e-12)
+            positivity_loss = positivity_constraint_loss(pred, reduction="mean")
+            
+            # data_loss = loss_fn(pred, y_true)
+            wandb_dict.update(physics_diagnostics)
+            if l1_lambda > 0:
+                l1_penalty = torch.zeros((), device=pred.device)
+                for p in model.parameters():
+                    if p.requires_grad:
+                        l1_penalty = l1_penalty + p.abs().sum()
+                loss = data_loss + l1_lambda * l1_penalty + jr_lambda*jr_loss + positivity_lambda * positivity_loss + temperature_lambda*implied_temp_loss
+                # loss = data_loss + l1_lambda * l1_penalty + 1e-2*jr_loss + 1e-2*positivity_loss
+            else:
+                l1_penalty = torch.zeros((), device=pred.device)
+                loss = data_loss + jr_lambda*jr_loss + positivity_lambda * positivity_loss + temperature_lambda*implied_temp_loss
+            
+            # Add Physics constraints loss
+            # print("data_loss:", data_loss.item())
+            # print("jr_loss:", jr_loss.item())
+            # print("positivity_loss:", positivity_loss.item())
+            # print("temp_loss:", implied_temp_loss.item())
+            # print("l1:", l1_penalty.item())
+            # print("total:", loss.item())
+
+            for name, val in {
+                "data_loss": data_loss,
+                "jr_loss": jr_loss,
+                "positivity_loss": positivity_loss,
+                "temp_loss": implied_temp_loss,
+                "loss": loss,
+            }.items():
+                if not torch.isfinite(val).all():
+                    raise RuntimeError(f"{name} became non-finite: {val}")
+            accelerator.backward(loss)
+            accelerator.clip_grad_norm_(model.parameters(),max_norm=1.0)
+            optimizer.step()
+
+            pred = pred.detach().cpu()
+            y_true = y_true.detach().cpu()
+            # bookkeeping
+            cur_loss = loss.detach()
             running_metrics = update_running_metric(metrics_list, running_metrics, cur_loss, y_true, pred, y_true.size(0), train_dataset.data_min[2:], train_dataset.data_max[2:], train_dataset.climatology, accelerator)
 
         train_epoch_metrics = get_epoch_metric(metrics_list, running_metrics, len(train_loader.dataset), prefix='train')
@@ -389,7 +434,7 @@ def train(
                 wandb_dict[f"gradnorm_weight_{task_name}"] = weight
             for task_name, task_loss in zip(task_names, computed_task_losses.detach().cpu()):
                 wandb_dict[f"train_group_loss_{task_name}"] = float(task_loss)
-
+        
         update_metrics_list_dict(metrics_list, train_metrics_dict, train_epoch_metrics)
         update_metrics_list_dict(COMPONENT_LIST, train_component_metrics_dict, train_epoch_component_metrics)
 
@@ -432,10 +477,9 @@ def train(
                     accelerator
                 ).detach().cpu()
                 
-                y_true = data_inverse_transformation(y_true, inverse_transform=test_dataset.inverse_transform, power=test_dataset.inverse_transform_power, scale_metric=481.3711, scale=train_dataset.scale)
-                pred = data_inverse_transformation(pred, inverse_transform=test_dataset.inverse_transform, power=test_dataset.inverse_transform_power, scale_metric=481.3711, scale=train_dataset.scale)
-                # y_true *= 481.3711
-                # pred *= 481.3711
+                y_true = data_inverse_transformation(y_true, inverse_transform=test_dataset.inverse_transform, power=test_dataset.inverse_transform_power, unit_scale='cgs', scale=train_dataset.scale)
+                pred = data_inverse_transformation(pred, inverse_transform=test_dataset.inverse_transform, power=test_dataset.inverse_transform_power, unit_scale='cgs', scale=train_dataset.scale)
+
                 for k in PER_SAMPLE_PER_COMPONENT_METRICS:
                     per_sample_per_component_test_list[k][idx] = compute_image_metrics(y_true, pred, train_dataset.climatology, k)
                 running_metrics = update_running_metric(metrics_list, running_metrics, cur_loss, y_true, pred, y_true.size(0), test_dataset.data_min[2:], test_dataset.data_max[2:], train_dataset.climatology, accelerator)

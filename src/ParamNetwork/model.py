@@ -1,63 +1,65 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from neuralop.models import SFNO, FNO,TFNO, GINO, LocalNO
+from neuralop.models import FNO,TFNO, GINO
+from neuralop.models.sfno import SFNO
+from neuralop.models.local_no import LocalNO
 from neuralop.models.codano import CODANO
 from neuralop.layers.spherical_convolution import SphericalConv
 from neuralop.layers.spectral_convolution import SpectralConv
 
-def fetch_sfno_model(n_modes, in_channels, interim_channels, hidden_channels, n_layers, rank):
-    common_no = SFNO(
-        n_modes=n_modes,
-        in_channels=in_channels,
-        out_channels=interim_channels,
-        hidden_channels=hidden_channels,
-        factorization="dense",
-        projection_channel_ratio=2,
-        n_layers=n_layers,
-        positional_embedding=None )
+# def fetch_sfno_model(n_modes, in_channels, interim_channels, hidden_channels, n_layers, rank):
+#     common_no = SFNO(
+#         n_modes=n_modes,
+#         in_channels=in_channels,
+#         out_channels=interim_channels,
+#         hidden_channels=hidden_channels,
+#         factorization="dense",
+#         projection_channel_ratio=2,
+#         n_layers=n_layers,
+#         positional_embedding=None )
 
-    vel_model = SFNO(
-        n_modes=n_modes,
-        in_channels=interim_channels,
-        out_channels=2,
-        hidden_channels=hidden_channels,
-        factorization="dense",
-        projection_channel_ratio=2,
-        n_layers=n_layers,
-        positional_embedding=None 
-    )
-    mag_field_model = SFNO(
-        n_modes=n_modes,
-        in_channels=interim_channels,
-        out_channels=2,
-        hidden_channels=hidden_channels,
-        factorization="dense",
-        projection_channel_ratio=2,
-        n_layers=n_layers,
-        positional_embedding=None 
-    )
-    cur_density_model = SFNO(
-        n_modes=n_modes,
-        in_channels=interim_channels,
-        out_channels=3,
-        hidden_channels=hidden_channels,
-        factorization="dense",
-        projection_channel_ratio=2,
-        n_layers=n_layers,
-        positional_embedding=None 
-    )
-    rho_p_model = SFNO(
-        n_modes=n_modes,
-        in_channels=interim_channels,
-        out_channels=2,
-        hidden_channels=hidden_channels,
-        factorization="dense",
-        projection_channel_ratio=2,
-        n_layers=n_layers,
-        positional_embedding=None 
-    )
-    return common_no, vel_model, mag_field_model, cur_density_model, rho_p_model
+#     vel_model = SFNO(
+#         n_modes=n_modes,
+#         in_channels=interim_channels,
+#         out_channels=2,
+#         hidden_channels=hidden_channels,
+#         factorization="dense",
+#         projection_channel_ratio=2,
+#         n_layers=n_layers,
+#         positional_embedding=None 
+#     )
+#     mag_field_model = SFNO(
+#         n_modes=n_modes,
+#         in_channels=interim_channels,
+#         out_channels=2,
+#         hidden_channels=hidden_channels,
+#         factorization="dense",
+#         projection_channel_ratio=2,
+#         n_layers=n_layers,
+#         positional_embedding=None 
+#     )
+#     cur_density_model = SFNO(
+#         n_modes=n_modes,
+#         in_channels=interim_channels,
+#         out_channels=3,
+#         hidden_channels=hidden_channels,
+#         factorization="dense",
+#         projection_channel_ratio=2,
+#         n_layers=n_layers,
+#         positional_embedding=None 
+#     )
+#     rho_p_model = SFNO(
+#         n_modes=n_modes,
+#         in_channels=interim_channels,
+#         out_channels=2,
+#         hidden_channels=hidden_channels,
+#         factorization="dense",
+#         projection_channel_ratio=2,
+#         n_layers=n_layers,
+#         positional_embedding=None 
+#     )
+#     return common_no, vel_model, mag_field_model, cur_density_model, rho_p_model
 
 def fetch_fno_model(n_modes, in_channels, interim_channels, hidden_channels, n_layers, rank, domain_padding=0, convolution='spectral'):
     common_no = FNO(

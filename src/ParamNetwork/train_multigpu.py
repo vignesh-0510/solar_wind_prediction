@@ -46,6 +46,7 @@ def main():
     gradnorm_lr = config['train_params']["gradnorm_lr"]
     use_gradnorm = config['train_params']["use_gradnorm"]
     resolutions = config['train_params']["resolutions"]
+    normalization = config['train_params']["normalization"]
 
     model_type = config['model_params']['model_type']
     operator_type = config['model_params']['operator_type']
@@ -57,6 +58,9 @@ def main():
     rank = config['model_params']['rank']
     conv_module = config['model_params']['conv_module']
     n_layers = config['model_params']['n_layers']
+    J_curl_lambda = config['model_params']['J_curl_lambda']
+    positivity_lambda = config['model_params']['positivity_lambda']
+    temperature_lambda = config['model_params']['temperature_lambda']
     # modes = [int(0.9* m) for m in modes]
 
     wandb_run_name = config['wandb_params']['run_name']
@@ -83,18 +87,22 @@ def main():
     scale_up=scale_up,
     transform=data_transform,
     pos_embedding=pos_embedding,
-    resolutions = resolutions
+    resolutions = resolutions,
+    normalization=normalization
     )
     test_dataset = InitialParamDataset(
     DATA_DIR, 
     cr_test, 
     v_min=train_dataset.v_min, 
     v_max=train_dataset.v_max,
+    v_mean = train_dataset.v_mean,
+    v_std = train_dataset.v_std,
     scale_up=scale_up,
     transform=data_transform,
     pos_embedding=pos_embedding,
     resolutions = resolutions,
-    scale = train_dataset.get_transform_scale()
+    scale = train_dataset.get_transform_scale(),
+    normalization=normalization
     )
 
     accelerator = Accelerator()
@@ -121,26 +129,32 @@ def main():
         "group_name": wandb_group_name,
     }
     wandb_params = {
-        "num_epochs": n_epochs,
-        "batch_size": batch_size,
-        "learning_rate": lr,
-        "train_files": cr_train,
-        "test_files": cr_test,
-        "v_min": [float(v) for v in train_dataset.v_min],
-        "v_max": [float(v) for v in train_dataset.v_max],
-        "loss_fn": loss_fn_str,
-        "scale_up": scale_up,
+        'num_epochs': n_epochs,
+        'batch_size': batch_size,
+        'learning_rate': lr,
+        'train_files': cr_train,
+        'test_files': cr_test,
+        'v_min': [float(v) for v in train_dataset.v_min] if normalization != 'standard' else None,
+        'v_max': [float(v) for v in train_dataset.v_max] if normalization != 'standard' else None,
+        'v_mean': [float(v) for v in train_dataset.v_mean] if normalization == 'standard' else None,
+        'v_std': [float(v) for v in train_dataset.v_std] if normalization == 'standard' else None,
+        'loss_fn': loss_fn_str,
+        'scale_up': scale_up,
         'weight_decay': 0.0,
         'job_id': job_id,
         'l1_lambda': l1_lambda,
-        "modes":modes,
+        'modes': modes,
         'rank': rank,
         'convolution': conv_module,
         'n_layers': n_layers,
-        "gradnorm_alpha": gradnorm_alpha,
-        "gradnorm_lr": gradnorm_lr,
-        "use_gradnorm": use_gradnorm,
+        'gradnorm_alpha': gradnorm_alpha,
+        'gradnorm_lr': gradnorm_lr,
+        'use_gradnorm': use_gradnorm,
         'data_transform': data_transform,
+        'normalization': normalization,
+        'J_curl_lambda': J_curl_lambda,
+        'positivity_lambda': positivity_lambda,
+        'temperature_lambda': temperature_lambda,
     }
     if accelerator.is_main_process:
         with open(os.path.join(out_path, "cfg.json"), "w", encoding="utf-8") as f:

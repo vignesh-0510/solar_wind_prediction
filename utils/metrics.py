@@ -2,6 +2,9 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 from sewar.full_ref import uqi as __uqi
+import piq
+
+
 
 # scipy.stats used to expose `wasserstein_distance_nd` in some versions.
 # Newer SciPy versions only provide `wasserstein_distance` (1-D). Provide
@@ -36,6 +39,17 @@ def emv_per_slice(y_true: torch.Tensor, y_pred: torch.Tensor):
 
 
 def emv_per_sample(y_true: torch.Tensor, y_pred: torch.Tensor):
+    assert y_true.ndim == 4 and y_pred.ndim == 4, "B, C, H, W shape required"
+    y_true = y_true.to("cpu").numpy()
+    y_pred = y_pred.to("cpu").numpy()
+    results = []
+    for i in range(y_true.shape[0]):
+        result = [__emv(y_true[i, j], y_pred[i, j]) for j in range(y_true.shape[1])]
+        result = np.mean(result)
+        results.append(result)
+    return results
+
+def emv_per_sample_per_component(y_true: torch.Tensor, y_pred: torch.Tensor):
     assert y_true.ndim == 4 and y_pred.ndim == 4, "B, C, H, W shape required"
     y_true = y_true.to("cpu").numpy()
     y_pred = y_pred.to("cpu").numpy()
@@ -126,6 +140,80 @@ def nnse_score(
     nnse = 1 / (2 - nse)
     return float(nnse.item())
 
+def nnse_score_per_component(
+    y_true: torch.Tensor,
+    y_pred: torch.Tensor,
+    climatology: torch.Tensor,
+    eps: float = 1e-6,
+) -> float:
+    """
+    Compute the Normalized Nash–Sutcliffe Efficiency (NNSE) score.
+
+    Args:
+        y_true (torch.Tensor): Ground truth, shape (B, C, H, W)
+        y_pred (torch.Tensor): Prediction, shape (B, C, H, W)
+        climatology (torch.Tensor): Climatology mean field, shape (C, H, W)
+        eps (float): Small number to avoid divide-by-zero
+
+    Returns:
+        float: NNSE score (higher is better, max = 1)
+    """
+    assert (
+        y_true.shape == y_pred.shape
+    ), f"y_true {y_true.shape} and y_pred {y_pred.shape} must have the same shape"
+    assert (
+        y_true.shape[1:] == climatology.shape
+    ), f"climatology {climatology.shape} must match spatial shape {y_true.shape[1:]}"
+
+    # Expand climatology to match batch size
+    clim = climatology.unsqueeze(0).expand_as(y_true)
+
+    # Compute NSE
+    numerator = torch.sum((y_true - y_pred) ** 2, dim=(0,2,3))
+    denominator = torch.sum((y_true - clim) ** 2, dim=(0,2,3)).clamp(min=eps)
+    nse = 1 - numerator / denominator
+
+    # Compute NNSE
+    nnse = 1 / (2 - nse)
+    return nnse.to("cpu").numpy()
+
+def nnse_score_per_sample_per_component(
+    y_true: torch.Tensor,
+    y_pred: torch.Tensor,
+    climatology: torch.Tensor,
+    eps: float = 1e-6,
+) -> float:
+    """
+    Compute the Normalized Nash–Sutcliffe Efficiency (NNSE) score.
+
+    Args:
+        y_true (torch.Tensor): Ground truth, shape (B, C, H, W)
+        y_pred (torch.Tensor): Prediction, shape (B, C, H, W)
+        climatology (torch.Tensor): Climatology mean field, shape (C, H, W)
+        eps (float): Small number to avoid divide-by-zero
+
+    Returns:
+        torch.Tensor: NNSE score (higher is better, max = 1)
+    """
+    assert (
+        y_true.shape == y_pred.shape
+    ), f"y_true {y_true.shape} and y_pred {y_pred.shape} must have the same shape"
+    assert (
+        y_true.shape[1:] == climatology.shape
+    ), f"climatology {climatology.shape} must match spatial shape {y_true.shape[1:]}"
+
+    # Expand climatology to match batch size
+    clim = climatology.unsqueeze(0).expand_as(y_true)
+    eps = 1e-50
+    # Compute NSE
+    numerator = torch.sum((y_true - y_pred) ** 2, dim=(2,3))
+    denominator = torch.sum((y_true - clim) ** 2, dim=(2,3)).clamp(min=eps)
+    nse = 1 - numerator / denominator
+
+    # Compute NNSE
+    nnse = 1 / (2 - nse)
+    return nnse
+
 
 def acc_score(
     y_true: torch.Tensor,
@@ -168,6 +256,89 @@ def acc_score(
     acc = numerator / denom
     return float(acc.item())
 
+def acc_score_per_component(
+    y_true: torch.Tensor,
+    y_pred: torch.Tensor,
+    climatology: torch.Tensor,
+    eps: float = 1e-6,
+) -> float:
+    """
+    Compute Anomaly Correlation Coefficient (ACC).
+
+    Args:
+        y_true (torch.Tensor): Ground truth, shape (B, D, H, W)
+        y_pred (torch.Tensor): Model prediction, shape (B, D, H, W)
+        climatology (torch.Tensor): Climatology mean field, shape (D, H, W)
+        eps (float): Small number to avoid division by zero
+
+    Returns:
+        Numpy Array(C,): ACC score per component
+    """
+    assert (
+        y_true.shape == y_pred.shape
+    ), f"y_true {y_true.shape} and y_pred {y_pred.shape} must have the same shape"
+    assert (
+        y_true.shape[1:] == climatology.shape
+    ), f"climatology {climatology.shape} must match spatial shape {y_true.shape[1:]}"
+
+    clim = climatology.unsqueeze(0).expand_as(y_true)
+
+    # Compute anomalies
+    y_true_anom = y_true - clim
+    y_pred_anom = y_pred - clim
+
+    # Numerator: dot product of anomalies
+    numerator = torch.sum(y_true_anom * y_pred_anom, dim=(0,2,3))
+
+    # Denominator: product of norms
+    true_norm = torch.sqrt(torch.sum(y_true_anom ** 2, dim=(0, 2, 3)))  # (C,)
+    pred_norm = torch.sqrt(torch.sum(y_pred_anom ** 2, dim=(0, 2, 3)))  # (C,)
+    denom = (true_norm * pred_norm).clamp_min(eps)  # (C,)
+
+    acc = numerator / denom
+    return acc.to("cpu").numpy()
+
+def acc_score_per_sample_per_component(
+    y_true: torch.Tensor,
+    y_pred: torch.Tensor,
+    climatology: torch.Tensor,
+    eps = 1e-6,
+) -> float:
+    """
+    Compute Anomaly Correlation Coefficient (ACC).
+
+    Args:
+        y_true (torch.Tensor): Ground truth, shape (B, D, H, W)
+        y_pred (torch.Tensor): Model prediction, shape (B, D, H, W)
+        climatology (torch.Tensor): Climatology mean field, shape (D, H, W)
+        eps (float): Small number to avoid division by zero
+
+    Returns:
+        Numpy Array(C,): ACC score per component
+    """
+    assert (
+        y_true.shape == y_pred.shape
+    ), f"y_true {y_true.shape} and y_pred {y_pred.shape} must have the same shape"
+    assert (
+        y_true.shape[1:] == climatology.shape
+    ), f"climatology {climatology.shape} must match spatial shape {y_true.shape[1:]}"
+
+    clim = climatology.unsqueeze(0).expand_as(y_true)
+    eps = 1e-50
+    # Compute anomalies
+    y_true_anom = y_true - clim
+    y_pred_anom = y_pred - clim
+
+    # Numerator: dot product of anomalies
+    numerator = torch.sum(y_true_anom * y_pred_anom, dim=(2,3))
+
+    # Denominator: product of norms
+    true_norm = torch.sqrt(torch.sum(y_true_anom ** 2, dim=(2, 3)))  # (B,C)
+    pred_norm = torch.sqrt(torch.sum(y_pred_anom ** 2, dim=(2, 3)))  # (B,C)
+    denom = (true_norm * pred_norm).clamp_min(eps)  # (B,C)
+
+    acc = numerator / denom
+    return acc
 
 def psnr_score(
     y_true: torch.Tensor,
@@ -225,6 +396,34 @@ def psnr_score_per_sample(
     max_vals = torch.amax(y_true, dim=(1, 2, 3))
     psnr = 10 * torch.log10((max_vals**2) / (mse + eps))
     return psnr  # shape: (B,)
+
+def psnr_score_per_sample_per_component(
+    y_true: torch.Tensor,
+    y_pred: torch.Tensor,
+    eps=1e-10,
+) -> torch.Tensor:
+    """
+    Compute PSNR per sample for a batch of data.
+
+    Args:
+        y_true (torch.Tensor): Ground truth tensor of shape (B, ...)
+        y_pred (torch.Tensor): Predicted tensor of same shape
+        eps (float): Small value to avoid division by zero
+
+    Returns:
+        torch.Tensor: PSNR values for each sample, shape (B,C)
+    """
+    assert y_true.shape == y_pred.shape, f"{y_true.shape} != {y_pred.shape}"
+    assert y_true.dtype == y_pred.dtype, f"{y_true.dtype} != {y_pred.dtype}"
+    eps = torch.ones_like(y_true[:,:,0,0], dtype=torch.float64) * eps
+
+    eps[:,:] = 1e-50
+    B = y_true.shape[0]
+    # Flatten spatial dimensions per sample
+    mse = torch.mean((y_true - y_pred) ** 2, dim=(2, 3))
+    max_vals = torch.amax(y_true, dim=(2, 3))
+    psnr = 10 * torch.log10((max_vals**2) / (mse + eps))
+    return psnr  # shape: (B,C)
 
 
 def psnr_score_per_sample_masked(
@@ -368,6 +567,35 @@ def mse_score_per_sample(y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Te
     squared_error = (y_true - y_pred) ** 2
 
     reduce_dims = tuple(range(1, y_true.ndim))
+    mse_per_sample = torch.mean(squared_error, dim=reduce_dims)
+
+    return mse_per_sample
+def mse_score_per_sample_per_component(y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
+    """
+    Compute Root Mean Squared Error (RMSE) for each sample in a batch
+    between y_true and y_pred.
+
+    Args:
+        y_true (torch.Tensor): Ground truth tensor, shape (B, ...)
+                               where B is the batch size.
+        y_pred (torch.Tensor): Predicted tensor, shape (B, ...)
+                               must match y_true.shape.
+
+    Returns:
+        torch.Tensor: A 2D tensor of RMSE values of shape (B,C),
+                      containing the RMSE for each sample in the batch.
+    """
+    assert (
+        y_true.shape == y_pred.shape
+    ), f"Shapes of y_true ({y_true.shape}) and y_pred ({y_pred.shape}) must match"
+    assert (
+        y_true.ndim > 0
+    ), "Input tensors must have at least one dimension (batch size)."
+
+    # Calculate squared error
+    squared_error = (y_true - y_pred) ** 2
+
+    reduce_dims = tuple((2,3))
     mse_per_sample = torch.mean(squared_error, dim=reduce_dims)
 
     return mse_per_sample
@@ -621,3 +849,96 @@ def mse_score_per_slice_masked(
     mse_per_sample = torch.mean(masked_squared_error, dim=(2, 3))
 
     return mse_per_sample
+
+
+@torch.no_grad()
+def compute_similarity_components(
+    y_true: torch.Tensor,   # (B, 9, H, W)
+    y_pred: torch.Tensor,   # (B, 9, H, W)
+    data_min: torch.Tensor,
+    data_max: torch.Tensor,
+    iqa_type:str = 'MSSSIM',
+    clamp: bool = False,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    """
+    Returns a scalar: mean over components (9) and batch (B).
+    Computes MS-SSIM separately per component to respect per-component ranges.
+    """
+    assert y_true.shape == y_pred.shape and y_true.dim() == 4
+    components = y_true.size(1)
+
+    true_min = y_true.amin(dim=(0, 2, 3))   # (9,)
+    pred_min = y_pred.amin(dim=(0, 2, 3))   # (9,)
+    data_min = torch.minimum(true_min, pred_min)  # (9,)
+
+    true_max = y_true.amax(dim=(0, 2, 3))   # (9,)
+    pred_max = y_pred.amax(dim=(0, 2, 3))   # (9,)
+    data_max = torch.maximum(true_max, pred_max)  # (9,)
+
+    # broadcast
+    data_min = data_min.view(1, components, 1, 1)
+    data_max = data_max.view(1, components, 1, 1)
+    denom = (data_max - data_min)
+
+    # Normalize both using the SAME bounds (train bounds)
+    yt = (y_true - data_min) / denom
+    yp = (y_pred - data_min) / denom
+
+    if clamp:
+        yt = yt.clamp(0.0, 1.0)
+        yp = yp.clamp(0.0, 1.0)
+
+    scores = []
+    MS3_WEIGHTS = torch.tensor([0.3, 0.3, 0.4])
+    for c in range(components):
+        x = yp[:, c:c+1, :, :]
+        y = yt[:, c:c+1, :, :]
+
+        # piq.multi_scale_ssim returns (B,) if reduction='none'
+        if iqa_type == 'MSSSIM':
+            s = piq.multi_scale_ssim(x, y, data_range=1.0, scale_weights=MS3_WEIGHTS,kernel_size=7, reduction='none')
+        elif iqa_type == 'PSNR':
+            s = piq.psnr(x, y, data_range=1.0, reduction='none')
+        elif iqa_type == 'VIF':
+            s = piq.vif_p(x, y, data_range=1.0, reduction='none')
+        elif iqa_type == 'FSIM':    
+            s = piq.fsim(x, y, data_range=1.0, reduction='none',chromatic=False, )
+        elif iqa_type == "SRSIM":
+            s = piq.srsim(x, y, data_range=1.0, reduction="none")
+        elif iqa_type == "GMSD":
+            s = piq.gmsd(x, y, data_range=1.0, reduction="none")  # lower=better
+        elif iqa_type in ("MSGMSD", "MS-GMSD"):
+            s = piq.multi_scale_gmsd(x, y, data_range=1.0, reduction="none")  # lower=better
+        elif iqa_type == "VSI":
+            s = piq.vsi(x, y, data_range=1.0, reduction="none")
+        else:
+            raise ValueError(f"Unknown iqa_type: {iqa_type}")
+        scores.append(s)
+
+    scores = torch.stack(scores, dim=1).mean()
+    return scores   
+
+def compute_image_metrics(y_true, y_pred, climatology=None, iqa_type='ACC'):
+    result = None
+    if iqa_type == 'EMV':
+        result=emv_per_slice(y_true, y_pred)       # (B,C)
+        # result = result.mean(axis=0)       # (C,)
+        result = torch.from_numpy(result)
+    elif iqa_type == 'UQI':
+        result = uqi_per_slice(y_true, y_pred)       # (B,C)
+        # result = result.mean(axis=0)       # (C,)
+        result = torch.from_numpy(result)
+    elif iqa_type == 'PSNR':
+        result = psnr_score_per_sample_per_component(y_true, y_pred)       # (B,C)
+        # result = result.mean(axis=0)       # (C,)
+    elif iqa_type == 'MSE':
+        result = mse_score_per_sample_per_component(y_true, y_pred)       # (B,C)
+        # result = result.mean(axis=0)       # (C,)
+    elif iqa_type == 'NNSE':
+        result = nnse_score_per_sample_per_component(y_true, y_pred, climatology)       # (B,C)
+        # result = result.mean(axis=0)       # (C,)
+    elif iqa_type == 'ACC':
+        result = acc_score_per_sample_per_component(y_true, y_pred, climatology)       # (B,C)
+        # result = result.mean(axis=0)       # (C,)
+    return result.float()

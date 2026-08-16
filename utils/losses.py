@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from neuralop import LpLoss
 
 class L2OperatorLoss(nn.Module):
     """
@@ -29,3 +30,13 @@ class L2OperatorLoss(nn.Module):
             return loss_per_function.sum()
         else:
             return loss_per_function
+
+def fetch_loss_function(loss_fn_str):
+    if loss_fn_str == "l2":
+        return LpLoss(d=2, p=2)
+    elif loss_fn_str == "l2l1":
+        return L1L2Loss(d=2)
+    elif loss_fn_str == "mse":
+        return nn.MSELoss()
+    else:
+        raise ValueError('loss should be either "l2" or "l2l1"')

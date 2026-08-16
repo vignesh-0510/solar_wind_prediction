@@ -1,6 +1,32 @@
 import os
 import re
 from PIL import Image
+import matplotlib.pyplot as plt
+import numpy as np
+
+LABEL_CONFIG = {
+    "vt": {"cmap": "gnuplot", "title": r"$v_\theta$"},
+    "vp": {"cmap": "gnuplot", "title": r"$v_\phi$"},
+    "bt": {"cmap": "coolwarm", "title": r"$\mathbf{B}_\theta$"},
+    "bp": {"cmap": "coolwarm", "title": r"$\mathbf{B}_\phi$"},
+    "jt": {"cmap": "inferno", "title": r"$\mathbf{J}_\theta$"},
+    "jp": {"cmap": "inferno", "title": r"$\mathbf{J}_\phi$"},
+    "jr": {"cmap": "inferno", "title": r"$\mathbf{J}_r$"},
+    "rho": {"cmap": "viridis", "title": r"$\rho$"},
+    "p": {"cmap": "viridis", "title": r"$p$"}
+}
+
+LABEL_CONFIG = {
+    "vt": {"cmap": "viridis", "title": r"$v_\theta$"},
+    "vp": {"cmap": "viridis", "title": r"$v_\phi$"},
+    "bt": {"cmap": "viridis", "title": r"$\mathbf{B}_\theta$"},
+    "bp": {"cmap": "viridis", "title": r"$\mathbf{B}_\phi$"},
+    "jt": {"cmap": "viridis", "title": r"$\mathbf{J}_\theta$"},
+    "jp": {"cmap": "viridis", "title": r"$\mathbf{J}_\phi$"},
+    "jr": {"cmap": "viridis", "title": r"$\mathbf{J}_r$"},
+    "rho": {"cmap": "viridis", "title": r"$\rho$"},
+    "p": {"cmap": "viridis", "title": r"$p$"}
+}
 
 
 def create_gif_from_array(array, folder_path='./', file_name='image.gif', duration=100):
@@ -140,6 +166,48 @@ def create_input_output_gif(
     plt.close(fig)
 
     print(f"GIF saved to {output_gif}")
+
+def create_initial_param_plot(y_true, pred, labels, folder_path="./", file_name="initial_param_comparison.png", cmap="viridis", dpi=200):
+    assert y_true.shape == pred.shape, "y_true and pred must have the same shape (C, H, W)"
+    
+    output_path = os.path.join(folder_path, file_name)
+    n_components = y_true.shape[0]
+    fig, ax = plt.subplots(3, n_components, figsize=(n_components*5, 11))
+    for i in range(n_components):
+        vmin = np.min([y_true[i].min(), pred[i].min()])
+        vmax = np.max([y_true[i].max(), pred[i].max()])
+
+        im0 = ax[0, i].imshow(y_true[i], cmap=f'{LABEL_CONFIG[labels[i]]["cmap"]}', vmin=vmin, vmax=vmax)
+        # ax[0, i].axis('off')
+        ax[0, i].set_title(f'{LABEL_CONFIG[labels[i]]["title"]}', fontsize=28)
+
+        im1 = ax[1, i].imshow(pred[i], cmap=f'{LABEL_CONFIG[labels[i]]["cmap"]}', vmin=vmin, vmax=vmax)
+        # ax[1, i].axis('off')
+        # ax[1, i].set_title(f'{labels[i]} pred')
+        
+        diff = y_true[i] - pred[i]
+        im2 = ax[2, i].imshow(diff, cmap='coolwarm', vmin=diff.min(), vmax=diff.max())
+        # ax[2, i].axis('off')
+        # ax[2, i].set_title(f'{labels[i]} diff [T - P]')
+        for row in range(3):
+            ax[row, i].set_xticks([])
+            ax[row, i].set_yticks([])
+
+        if i == 0:
+            ax[0, 0].set_ylabel("GT", fontsize=38)
+            ax[1, 0].set_ylabel("P", fontsize=38)
+            ax[2, 0].set_ylabel("Diff", fontsize=38)
+        # colorbar for each image, same scale (vmin/vmax) within the row
+        fig.colorbar(im0, ax=ax[0, i], fraction=0.04, pad=0.04)
+        fig.colorbar(im1, ax=ax[1, i], fraction=0.04, pad=0.04)
+        fig.colorbar(im2, ax=ax[2, i], fraction=0.04, pad=0.04)
+
+    plt.tight_layout()
+    plt.savefig(f'{output_path}.png', dpi=dpi)
+    plt.savefig(f'{output_path}.pdf', dpi=dpi)
+    plt.close(fig)
+
+    print(f"Initial parameter comparison plot saved to {output_path}.png")
 
 if __name__ == "__main__":
     import argparse

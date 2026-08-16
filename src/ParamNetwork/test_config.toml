@@ -3,19 +3,20 @@ data_dir = "/data/solar_wind_pred_vignesh/hdf/"
 base_dir = "/data/solar_wind_pred_vignesh"
 batch_size = 10
 data_transform = ['arcsinh', 'sqrt', 'arcsinh', 'arcsinh', 'arcsinh', 'arcsinh', 'arcsinh', 'arcsinh', 'pow']
+normalization='standard'
 
 [model_params]
-model_type = 'ParamNetwork'
+model_type = 'ParamNetworkPhysics'
 scale_up = 1
 operator_type = 'local_no'
 modes = [109,128]
 rank = 0.4
 conv_module = 'spherical'
-n_layers=4
-job_id = '2026_06_03__062346'
+n_layers=8
+job_id = '2026_08_10__191459'
 
 [wandb_params]
 run_name = 'ParamNetwork_SFNO_v1'
-run_id = 'd1i4sx58'
-group_name = 'ParamNetwork'
-description = 'SFNO Architecture' 
+run_id = 'd497xz1d'
+group_name = 'PhysicsConstraints'
+description = 'SFNO Architecture'

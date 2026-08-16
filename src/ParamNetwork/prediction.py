@@ -24,6 +24,8 @@ from model import ParamNetwork_v2 as ParamNetwork
 LABELS = ["vt", "vp", "bt", "bp", "jt", "jp", "jr", "rho", "p"]
 # LABELS = ["vt", "vp", "bt", "bp"]
 
+PER_SAMPLE_PER_COMPONENT_METRICS = ['MSE','PSNR','UQI', 'NNSE', 'EMV', 'ACC']
+
 LABEL_CONFIG = {
     "vt": {"cmap": "gnuplot", },
     "vp": {"cmap": "gnuplot"},
@@ -36,7 +38,7 @@ LABEL_CONFIG = {
     "p": {"cmap": "inferno"}
     }
 
-def load_minmax_from_wandb(run_id=None):
+def load_normalization_stats_from_wandb(run_id=None, normalization="standard"):
     entity = os.environ["WANDB_ENTITY"]
     project = os.environ["WANDB_PROJECT"]
 
@@ -45,19 +47,67 @@ def load_minmax_from_wandb(run_id=None):
     api = wandb.Api()
     run = api.run(run_path)
 
-    if "v_min" in run.config and "v_max" in run.config:
-        v_min = np.array(run.config["v_min"], dtype=np.float32)
-        v_max = np.array(run.config["v_max"], dtype=np.float32)
-        return v_min, v_max
+    if normalization == "standard":
+        keys = ("v_mean", "v_std")
+    elif normalization == "minmax":
+        keys = ("v_min", "v_max")
+    elif normalization is None:
+        return None, None
+    else:
+        raise ValueError(
+            f"Unknown normalization={normalization}. "
+            "Use 'standard', 'minmax', or None."
+        )
 
-    if "v_min" in run.summary and "v_max" in run.summary:
-        v_min = np.array(run.summary["v_min"], dtype=np.float32)
-        v_max = np.array(run.summary["v_max"], dtype=np.float32)
-        return v_min, v_max
+    k1, k2 = keys
+
+    if k1 in run.config and k2 in run.config:
+        stat_1 = np.array(run.config[k1], dtype=np.float32)
+        stat_2 = np.array(run.config[k2], dtype=np.float32)
+        return stat_1, stat_2
+
+    if k1 in run.summary and k2 in run.summary:
+        stat_1 = np.array(run.summary[k1], dtype=np.float32)
+        stat_2 = np.array(run.summary[k2], dtype=np.float32)
+        return stat_1, stat_2
 
     raise KeyError(
-        f"Could not find v_min and v_max in W&B run config/summary: {run_path}"
+        f"Could not find {k1} and {k2} in W&B run config/summary: {run_path}"
     )
+
+def undo_data_normalization(y, stat_1=None, stat_2=None, normalization="standard"):
+    """
+    Convert normalized transformed-space tensor back to transformed-space tensor.
+
+    y shape: (B, 9, H, W)
+
+    For standard:
+        stat_1 = v_mean, shape (1, 9, 1, 1)
+        stat_2 = v_std,  shape (1, 9, 1, 1)
+
+    For minmax:
+        stat_1 = v_min, shape (1, 9, 1, 1)
+        stat_2 = v_max, shape (1, 9, 1, 1)
+    """
+
+    if normalization == "standard":
+        v_mean = stat_1.to(dtype=y.dtype, device=y.device)
+        v_std = stat_2.to(dtype=y.dtype, device=y.device)
+        return y * v_std + v_mean
+
+    elif normalization == "minmax":
+        v_min = stat_1.to(dtype=y.dtype, device=y.device)
+        v_max = stat_2.to(dtype=y.dtype, device=y.device)
+        return y * (v_max - v_min) + v_min
+
+    elif normalization is None:
+        return y
+
+    else:
+        raise ValueError(
+            f"Unknown normalization={normalization}. "
+            "Use 'standard', 'minmax', or None."
+        )
 
 if __name__ == "__main__":
     with open('/app/src/ParamNetwork/test_config.toml', 'r') as f:
@@ -67,6 +117,7 @@ if __name__ == "__main__":
     BASE_DIR = config['train_params']['base_dir']
     batch_size = config['train_params']['batch_size']
     data_transform = config['train_params']['data_transform']
+    normalization = config['train_params'].get("normalization", "minmax")
 
     model_type = config['model_params']['model_type']
     operator_type = config['model_params']['operator_type']
@@ -87,24 +138,50 @@ if __name__ == "__main__":
     cr_train, cr_test = cr_dirs[:10], cr_dirs[split_ix:]
     cr_test = cr_train[:3] + cr_test[::len(cr_test)//10] # select 10 CRs for validation
     # cr_test = cr_train[:3] + ['cr1653', 'cr2136', 'cr2113']
-    train_dataset = InitialParamDataset(DATA_DIR, cr_train, scale_up=scale_up, transform=data_transform) 
-    
-    v_min = np.array([0.5253125909845469,-0.0012796911178156734,-3.7269550673475145,-0.2442893071431266,-4.513621076110547,-2.093753262112496,-0.00032836872729828475,-3.14856740955965,-3.131705103104508,0.16417273047122638,0.019939479342650147])
-    v_max = np.array([1.3568796600180182,0.0013951159198768437,3.718144036639526,0.18251925407702943,4.319377730937356,2.052534422059117,0.0003168233094889714,2.9858913779500904,3.0352640559348187,0.9682336564135958,0.024903301661084735])  
-    v_min, v_max = load_minmax_from_wandb(run_id=run_id)
-    print("Loaded v_min from W&B:", v_min)
-    print("Loaded v_max from W&B:", v_max)
-    test_dataset = InitialParamDataset(
+    train_dataset = InitialParamDataset(
         DATA_DIR,
-        cr_test,
+        cr_train,
         scale_up=scale_up,
-        v_min=v_min,
-        v_max=v_max,
         transform=data_transform,
-        scale = train_dataset.get_transform_scale()
+        normalization=normalization
     )
 
-    device = torch.device(f"cuda:0" if torch.cuda.is_available() else "cpu")
+    stat_1, stat_2 = load_normalization_stats_from_wandb(
+        run_id=run_id,
+        normalization=normalization
+    )
+
+    if normalization == "standard":
+        print("Loaded v_mean from W&B:", stat_1)
+        print("Loaded v_std from W&B:", stat_2)
+
+        test_dataset = InitialParamDataset(
+            DATA_DIR,
+            cr_test,
+            scale_up=scale_up,
+            v_mean=stat_1,
+            v_std=stat_2,
+            transform=data_transform,
+            scale=train_dataset.get_transform_scale(),
+            normalization=normalization
+        )
+
+    elif normalization == "minmax":
+        print("Loaded v_min from W&B:", stat_1)
+        print("Loaded v_max from W&B:", stat_2)
+
+        test_dataset = InitialParamDataset(
+            DATA_DIR,
+            cr_test,
+            scale_up=scale_up,
+            v_min=stat_1,
+            v_max=stat_2,
+            transform=data_transform,
+            scale=train_dataset.get_transform_scale(),
+            normalization=normalization
+        )
+
+    device = torch.device(f"cuda:1" if torch.cuda.is_available() else "cpu")
     # device = torch.device(f"cpu")
     # radii, thetas, phis = train_dataset.get_grid_points()
 
@@ -139,8 +216,21 @@ if __name__ == "__main__":
     model.eval()
     sample_idx = 1
     first = False
-    v_max = torch.as_tensor(v_max[2:], device=device).view(1, -1, 1, 1)
-    v_min = torch.as_tensor(v_min[2:], device=device).view(1, -1, 1, 1)
+    if normalization is not None:
+        stat_1_tensor = torch.as_tensor(
+            stat_1[2:],
+            dtype=torch.float32,
+            device=device
+        ).view(1, -1, 1, 1)
+
+        stat_2_tensor = torch.as_tensor(
+            stat_2[2:],
+            dtype=torch.float32,
+            device=device
+        ).view(1, -1, 1, 1)
+    else:
+        stat_1_tensor = None
+        stat_2_tensor = None
     
     with torch.no_grad():
         H,W = test_dataset.sims.shape[2:]
@@ -155,13 +245,22 @@ if __name__ == "__main__":
                 first = False
             B = x.size(0)
             pred = model(x)            # [B, 9, H, W]
-            v_max = v_max.to(dtype=pred.dtype)
-            v_min = v_min.to(dtype=pred.dtype)
-            y_true   = y_true * (v_max - v_min) + v_min
-            pred     = pred    * (v_max - v_min) + v_min
+            y_true = undo_data_normalization(
+                y_true,
+                stat_1=stat_1_tensor,
+                stat_2=stat_2_tensor,
+                normalization=normalization
+            )
 
-            y_true = data_inverse_transformation(y_true, inverse_transform=test_dataset.inverse_transform, power=test_dataset.inverse_transform_power, scale_metric=481.3711, scale=train_dataset.scale).detach().cpu().numpy()
-            pred = data_inverse_transformation(pred, inverse_transform=test_dataset.inverse_transform, power=test_dataset.inverse_transform_power, scale_metric=481.3711, scale=train_dataset.scale).detach().cpu().numpy()
+            pred = undo_data_normalization(
+                pred,
+                stat_1=stat_1_tensor,
+                stat_2=stat_2_tensor,
+                normalization=normalization
+            )
+
+            y_true = data_inverse_transformation(y_true, inverse_transform=test_dataset.inverse_transform, power=test_dataset.inverse_transform_power, unit_scale='cgs', scale=train_dataset.scale).detach().cpu().numpy()
+            pred = data_inverse_transformation(pred, inverse_transform=test_dataset.inverse_transform, power=test_dataset.inverse_transform_power, unit_scale='cgs', scale=train_dataset.scale).detach().cpu().numpy()
             # y_true = (y_true * 481.3711).detach().cpu().numpy()
             # pred = (pred * 481.3711).detach().cpu().numpy()
 

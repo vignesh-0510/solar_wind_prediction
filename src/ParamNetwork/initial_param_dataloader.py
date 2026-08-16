@@ -7,6 +7,7 @@ import numpy as np
 from tqdm import tqdm
 from pyhdf.SD import SD, SDC
 
+from physics_constraints import radial_current_from_curl
 from os.path import join as path_join
 from neuralop import LpLoss
 from scipy.ndimage import zoom
@@ -15,7 +16,7 @@ from neuralop.losses import H1Loss
 from scipy.interpolate import RegularGridInterpolator
 import gc
 
-FILE_NAMES = ["vr002.hdf", "br002.hdf", "vt002.hdf", "vp002.hdf", "bt002.hdf", "bp002.hdf", "jt002.hdf", "jp002.hdf", "jr002.hdf", "rho002.hdf", "p002.hdf"]
+FILE_NAMES = ["vr002.hdf", "br002.hdf", "vt002.hdf", "vp002.hdf", "bt002.hdf", "bp002.hdf", "jt002.hdf", "jp002.hdf", "jr002.hdf", "rho002.hdf", "p002.hdf", 't002.hdf']
 # FILE_NAMES = ["vr002.hdf", "br002.hdf", "vt002.hdf", "vp002.hdf", "bt002.hdf", "bp002.hdf"]
 DEFAULT_RESOLUTIONS = ['medium', 'high']
 
@@ -28,6 +29,20 @@ DEFAULT_INSTRUMENTS = [
     "mdi_mas_mas_std_0201",
 ]
 
+MAS_TO_CGS = torch.tensor([
+    4.813711e7,     # VR_0   cm/s
+    2.2068908,      # BR_0   G
+    4.813711e7,     # VT_0   cm/s
+    4.813711e7,     # VP_0   cm/s
+    2.2068908,      # BT_0   G
+    2.2068908,      # BP_0   G
+    0.07558,        # JT_0   statA/cm^2
+    0.07558,        # JP_0   statA/cm^2
+    0.07558,        # JR_0   statA/cm^2
+    1.6726e-16,     # RHO_0  g/cm^3
+    0.3875717,      # P_0    dyn/cm^2
+], dtype=torch.float32)
+MAS_TEMP_TO_K = 2.807067e7  # K
 
 def read_hdf(hdf_path, dataset_names):
     f = SD(hdf_path, SDC.READ)
@@ -112,13 +127,16 @@ def get_sim(sim_path, scale_up):
 
 def get_sims(sim_paths, scale_up, pos_emb = None):
     sims = []
-
+    temps = []
     for sim_path in tqdm(sim_paths, desc="Loading simulations"):
-        sim, _ = get_sim(sim_path, scale_up)  # (140, 111, 128)
+        sim, _ = get_sim(sim_path, scale_up)  # (12, 109, 128)
+        temp = sim[-1, :, :]   # temperature channel
+        sim = sim[:-1, :, :]  # Remove the last channel (temperature)
         sims.append(sim)
-
-    sims = np.stack(sims, axis=0)  # (N, 11, 111, 128)
-    return sims
+        temps.append(temp)
+    sims = np.stack(sims, axis=0)  # (N, 11, 109, 128)
+    temps = np.stack(temps, axis=0) # (N, 109, 128)
+    return sims, temps
 
 
 
@@ -263,7 +281,15 @@ def signed_inverse_transform(array, transform='square', power=None, epsilon=0.0,
     else:
         raise ValueError("Unsupported inverse transform type or missing power for 'pow' inverse transform.")
 
-def data_inverse_transformation(array, inverse_transform, power=None, scale_metric=481.3711,
+def cgs_unit_converter(array):
+    """
+    Convert array from MAS units to CGS units.
+    Input shape: (B, 9, H, W)
+    Output: array in CGS units
+    """
+    return array * MAS_TO_CGS[None, 2:, None, None].to(array.device)
+
+def data_inverse_transformation(array, inverse_transform, power=None, unit_scale='cgs',
                                 epsilon=0.0, delta=1.0, scale=None):
     """
     Differentiable inverse transform.
@@ -316,8 +342,10 @@ def data_inverse_transformation(array, inverse_transform, power=None, scale_metr
         channels.append(x_c)
 
     array_out = torch.cat(channels, dim=1)
-
-    return array_out * scale_metric
+    
+    if unit_scale == 'cgs':
+        array_out = cgs_unit_converter(array_out)
+    return array_out
 
 def min_max_normalize(array, min_=None, max_=None):
     if min_ is None or max_ is None:
@@ -334,6 +362,46 @@ def min_max_denormalize(array, min_, max_):
     :param max_: Maximum values for each channel (shape: (11,))
     '''
     array = array * (max_[:, None, None] - min_[:, None, None] + 1e-9) + min_[:, None, None]
+    return array
+
+def standardize(array, mean_=None, std_=None, eps=1e-12):
+    """
+    Standardize data per channel.
+
+    Parameters:
+    - array: np.ndarray of shape (N, C, H, W)
+    - mean_: optional np.ndarray of shape (C,)
+    - std_: optional np.ndarray of shape (C,)
+
+    Returns:
+    - standardized array
+    - mean_
+    - std_
+    """
+    if mean_ is None or std_ is None:
+        mean_ = np.mean(array, axis=(0, 2, 3))
+        std_ = np.std(array, axis=(0, 2, 3))
+
+    std_ = np.maximum(std_, eps)
+
+    array = (array - mean_[None, :, None, None]) / std_[None, :, None, None]
+
+    return array, mean_, std_
+
+
+def destandardize(array, mean_, std_):
+    """
+    Reverse standardization.
+
+    Parameters:
+    - array: standardized np.ndarray of shape (N, C, H, W)
+    - mean_: np.ndarray of shape (C,)
+    - std_: np.ndarray of shape (C,)
+
+    Returns:
+    - array in transformed physical scale before standardization
+    """
+    array = array * std_[None, :, None, None] + mean_[None, :, None, None]
     return array
 
 def compute_climatology(data: np.ndarray, scale_up) -> np.ndarray:
@@ -441,8 +509,11 @@ class InitialParamDataset(Dataset):
         self,
         data_path,
         cr_list,
+        v_mean=None,
+        v_std=None,
         v_min=None,
         v_max=None,
+        normalization="standard",
         instruments=None,
         scale_up=1,
         pos_embedding = None,
@@ -452,6 +523,9 @@ class InitialParamDataset(Dataset):
         scale = None
     ):
         super().__init__()
+        self.normalization = normalization
+        self.v_min, self.v_max = v_min, v_max
+        self.v_mean, self.v_std = v_mean, v_std
         self.transform = transform
         self.transform_power = None
         self.inverse_transform_power = None
@@ -475,8 +549,8 @@ class InitialParamDataset(Dataset):
         
         self.sim_paths, self.cr_mapping = collect_sim_paths(data_path, cr_list, instruments, resolutions)
         # print(self.sim_paths)
-        self.sims = get_sims(self.sim_paths, scale_up, pos_embedding)
-        self.scale = get_transform_scale(self.sims[:, 2:], method='percentile') if scale is None else torch.tensor(scale, dtype=torch.float32)
+        self.sims, self.temps = get_sims(self.sim_paths, scale_up, pos_embedding)
+        self.scale = get_transform_scale(self.sims[:, 2:], method='std') if scale is None else torch.tensor(scale, dtype=torch.float32)
         self.climatology = compute_climatology(self.sims[:,2:], scale_up)
         print(self.sims.shape)
 
@@ -485,7 +559,10 @@ class InitialParamDataset(Dataset):
         self.theta = torch.tensor(theta, dtype=torch.float32)
         self.phi = torch.tensor(phi, dtype=torch.float32)
         self.sims = data_transformation(self.sims, self.transform, power=self.transform_power, scale=self.scale)
-        self.sims, self.v_min, self.v_max = min_max_normalize(self.sims, v_min, v_max)
+        if self.normalization == 'standard':
+            self.sims, self.v_mean, self.v_std = standardize(self.sims, v_mean, v_std)
+        else:
+            self.sims, self.v_min, self.v_max = min_max_normalize(self.sims, v_min, v_max)
 
         self.data_min = torch.tensor([ 4.67303783e-01, -1.58353511e-03, -7.15157911e-02, -3.33132781e-02,
        -1.28728367e-04, -2.80083535e-04, -4.16646682e-04, -1.07131642e-03,
@@ -504,6 +581,7 @@ class InitialParamDataset(Dataset):
         return {
             "x": torch.from_numpy(cube[:2]).float(),
             "y": torch.from_numpy(cube[2:]).float(),
+            "temp": torch.from_numpy(self.temps[index]).float(),
             'cr': self.cr_mapping[index],
             'idx': index
         }
@@ -513,6 +591,8 @@ class InitialParamDataset(Dataset):
 
     def get_min_max(self):
         return {"v_min": [float(v) for v in self.v_min], "v_max": [float(v) for v in self.v_max]}
+    def get_mean_std(self):
+        return {"v_mean": [float(v) for v in self.v_mean], "v_std": [float(v) for v in self.v_std]}
 
     def get_grid_points(self):
         return get_coords(self.sim_paths[0])

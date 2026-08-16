@@ -9,9 +9,10 @@ gradnorm_alpha = 1.5
 gradnorm_lr = 1e-4
 use_gradnorm = true
 resolutions = ['medium']
+normalization='standard'
 
 [model_params]
-model_type = 'ParamNetwork'
+model_type = 'ParamNetworkPhysics'
 operator_type = 'local_no'
 scale_up = 1
 loss_fn = 'l2'
@@ -20,10 +21,13 @@ l1_lambda = 1e-8
 modes = [109,128]
 rank = 0.4
 conv_module = 'spherical'
-n_layers=4
+n_layers=8
+temperature_lambda = 1e-1
+J_curl_lambda = 1e-2
+positivity_lambda = 1e-4
 
 [wandb_params]
 enable_wandb_logging = true
-run_name = 'V2_gradnorm_physical_unit_custom_transform_q95_scale_asinh'
-group_name = 'gradnorm'
+run_name = 'V2_gradnorm_physics_J_curl_positivity_implied_temperature'
+group_name = 'PhysicsConstraints'
 description = 'Test' 
